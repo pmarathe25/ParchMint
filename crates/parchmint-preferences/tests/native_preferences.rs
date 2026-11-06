@@ -8,13 +8,43 @@ use std::{
 };
 
 use parchmint_preferences::{
-    AppearanceController, AppearanceMode, ApplicationPreferences, FilePreferenceStore,
-    PreferenceCommand, PreferenceCoordinator, PreferenceError, PreferenceRevision,
-    PreferenceService, PreferenceStore, RecentProject, ResolvedAppearance, ThemeSnapshot,
+    AppearanceController, AppearanceMode, ApplicationPreferences, AssistantAuthentication,
+    AssistantPreferences, AssistantProvider, FilePreferenceStore, PreferenceCommand,
+    PreferenceCoordinator, PreferenceError, PreferenceRevision, PreferenceService, PreferenceStore,
+    RecentProject, ResolvedAppearance, ThemeSnapshot,
 };
 
 struct TemporaryFile {
     path: PathBuf,
+}
+
+#[test]
+fn assistant_configuration_is_shared_and_survives_restart() {
+    let file = TemporaryFile::new("assistant");
+    let store: Arc<dyn PreferenceStore> = Arc::new(FilePreferenceStore::new(file.path()));
+    let service = PreferenceCoordinator::new(store);
+    let initial = block_on(service.load()).unwrap();
+    assert_eq!(initial.values.assistant.model, "gpt-6.1-terra");
+    let profile = AssistantPreferences {
+        provider: AssistantProvider::OpenAiCompatible,
+        model: "local-model".into(),
+        endpoint: "http://localhost:8080/v1".into(),
+        authentication: AssistantAuthentication::None,
+        compatible_function_tools: false,
+        compatible_streaming: true,
+        credential_reference: None,
+        credential_binding: None,
+        monthly_budget_cents: 8_000,
+        warning_cents: 6_000,
+        reset_day: 1,
+    };
+    block_on(service.update(
+        initial.revision,
+        PreferenceCommand::SetAssistant(profile.clone()),
+    ))
+    .unwrap();
+    let reopened = block_on(FilePreferenceStore::new(file.path()).load()).unwrap();
+    assert_eq!(reopened.values.assistant, profile);
 }
 
 impl TemporaryFile {
@@ -105,6 +135,7 @@ fn preference_file_is_versioned_and_round_trips_recent_projects_dictionary_and_a
     let file = TemporaryFile::new("versioned");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        assistant: Default::default(),
         keybindings: Default::default(),
         ui_zoom_percent: 125,
         reduced_motion: true,
@@ -384,6 +415,7 @@ fn application_preferences_do_not_modify_project_state() {
     fs::write(project.path(), project_state).expect("project fixture should be written");
     let store = FilePreferenceStore::new(file.path());
     let values = ApplicationPreferences {
+        assistant: Default::default(),
         keybindings: Default::default(),
         ui_zoom_percent: 100,
         reduced_motion: true,

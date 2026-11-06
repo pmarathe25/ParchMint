@@ -11,7 +11,7 @@ use iced::{
     Element, Event, Point as IcedPoint, Rectangle, Size,
     advanced::{clipboard, renderer::Headless, widget::Operation},
     event,
-    futures::StreamExt,
+    futures::{FutureExt, StreamExt},
     keyboard, mouse, window,
 };
 use iced_test::{
@@ -325,6 +325,9 @@ pub struct NativeDesktopHarness {
     reported_errors: BTreeMap<String, String>,
     hold_completions: bool,
     held_completions: VecDeque<Message>,
+    defer_next_assistant: bool,
+    defer_next_pending: bool,
+    deferred_tasks: VecDeque<iced::futures::stream::BoxStream<'static, runtime::Action<Message>>>,
 }
 
 impl NativeDesktopHarness {
@@ -342,6 +345,9 @@ impl NativeDesktopHarness {
             reported_errors: BTreeMap::new(),
             hold_completions: false,
             held_completions: VecDeque::new(),
+            defer_next_assistant: false,
+            defer_next_pending: false,
+            deferred_tasks: VecDeque::new(),
         };
         harness.run_task(task)?;
         Ok(harness)
@@ -373,6 +379,23 @@ impl NativeDesktopHarness {
             self.route_messages([message])?;
         }
         Ok(())
+    }
+
+    /// Suspends polling of the next submitted assistant request once it waits.
+    /// The independently started assistant worker continues in the background.
+    pub fn defer_next_assistant_request(&mut self) {
+        self.defer_next_assistant = true;
+    }
+
+    /// Waits for the deferred task and applies its normal completion messages.
+    pub fn complete_deferred_tasks(&mut self) -> Result<(), HarnessError> {
+        self.defer_next_assistant = false;
+        self.defer_next_pending = false;
+        if self.deferred_tasks.is_empty() {
+            return Err(HarnessError::new("no pending task was deferred"));
+        }
+        let streams = std::mem::take(&mut self.deferred_tasks);
+        self.run_streams(streams)
     }
 
     pub fn has_window(&self, window: HarnessWindow) -> bool {
@@ -1970,6 +1993,22 @@ impl NativeDesktopHarness {
         Ok(simulator.find(text).is_ok())
     }
 
+    /// Returns the draft for the active assistant conversation.
+    pub fn assistant_draft(&self, window: HarnessWindow) -> Result<String, HarnessError> {
+        let id = self.window_id(window)?;
+        let Some(NativeWindow::Project(state)) = self.desktop.windows.get(&id) else {
+            return Err(HarnessError::new("project window is unavailable"));
+        };
+        let workspace = state
+            .workspace
+            .as_ref()
+            .ok_or_else(|| HarnessError::new("project workspace has not loaded"))?;
+        workspace
+            .assistant_thread(workspace.assistant_tab())
+            .map(|thread| thread.draft.clone())
+            .ok_or_else(|| HarnessError::new("assistant conversation is unavailable"))
+    }
+
     /// Checks the current viewport and widget cache, including live scrolling.
     /// This establishes geometry; screenshots and clicks still verify occlusion.
     pub fn text_is_visible(
@@ -2153,6 +2192,61 @@ impl NativeDesktopHarness {
         let projection = iced::futures::executor::block_on(adapter.project(session, revision))
             .map_err(|error| HarnessError::new(error.to_string()))?;
         Ok(projection.body().to_owned())
+    }
+
+    /// Returns the live editor selection without accessing the OS clipboard.
+    pub fn active_editor_selection_text(&self) -> Result<String, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let binding = state
+            .editor_bindings
+            .get(&EditorPane::Primary)
+            .ok_or_else(|| HarnessError::new("editor is not mounted"))?;
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| HarnessError::new("project editor adapter is unavailable"))?;
+        Ok(adapter
+            .selection_clipboard(binding.session(), binding.view())
+            .map_err(|error| HarnessError::new(error.to_string()))?
+            .map_or_else(String::new, |selection| selection.plain_text().to_owned()))
+    }
+
+    /// Checks that the current selection has a visible anchor after a deep jump.
+    pub fn active_editor_selection_is_revealed(&self) -> Result<bool, HarnessError> {
+        let id = self.window_id(HarnessWindow::Project)?;
+        let NativeWindow::Project(state) = self
+            .desktop
+            .windows
+            .get(&id)
+            .ok_or_else(|| HarnessError::new("project window is unavailable"))?
+        else {
+            return Err(HarnessError::new("selected window is not a project"));
+        };
+        let binding = state
+            .editor_bindings
+            .get(&EditorPane::Primary)
+            .ok_or_else(|| HarnessError::new("editor is not mounted"))?;
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| HarnessError::new("project editor adapter is unavailable"))?;
+        let snapshot = adapter
+            .view_snapshot(binding.session(), binding.view())
+            .map_err(|error| HarnessError::new(error.to_string()))?;
+        let viewport = binding.host().viewport();
+        Ok(snapshot.presentation.pixel_scroll_y > 0.0
+            && binding
+                .host()
+                .action_anchor()
+                .is_some_and(|anchor| anchor.y < viewport.height && anchor.y + anchor.height > 0.0))
     }
 
     /// Returns the title of the document in the focused authoring pane.
@@ -2685,27 +2779,75 @@ impl NativeDesktopHarness {
         messages: impl IntoIterator<Item = Message>,
     ) -> Result<(), HarnessError> {
         for message in messages {
+            let defer_assistant = self.defer_next_assistant
+                && matches!(
+                    &message,
+                    Message::ProjectSurface {
+                        message: ProjectSurfaceMessage::Project(
+                            ProjectMessage::SubmitAssistant { .. }
+                        ),
+                        ..
+                    }
+                );
+            if defer_assistant {
+                self.defer_next_assistant = false;
+                self.defer_next_pending = true;
+            }
             let task = self.desktop.update(message);
             self.run_task(task)?;
+            if defer_assistant && self.defer_next_pending {
+                self.defer_next_pending = false;
+                return Err(HarnessError::new("assistant did not start a waiting task"));
+            }
         }
         Ok(())
     }
 
     fn run_task(&mut self, task: Task<Message>) -> Result<(), HarnessError> {
-        let mut pending = VecDeque::from([task]);
+        let streams = runtime::task::into_stream(task).into_iter().collect();
+        self.run_streams(streams)
+    }
+
+    fn run_streams(
+        &mut self,
+        mut pending: VecDeque<iced::futures::stream::BoxStream<'static, runtime::Action<Message>>>,
+    ) -> Result<(), HarnessError> {
         let mut failure = self.take_new_application_error();
-        while let Some(task) = pending.pop_front() {
-            let Some(mut stream) = runtime::task::into_stream(task) else {
-                continue;
-            };
-            while let Some(action) = iced::futures::executor::block_on(stream.next()) {
+        while let Some(mut stream) = pending.pop_front() {
+            loop {
+                let action = if self.defer_next_pending {
+                    // Iced tasks first yield once before polling their work.
+                    // Poll a few times so the assistant can start its worker
+                    // before the harness suspends this stream.
+                    let mut ready = stream.next().now_or_never();
+                    for _ in 0..3 {
+                        if ready.is_some() {
+                            break;
+                        }
+                        ready = stream.next().now_or_never();
+                    }
+                    match ready {
+                        Some(action) => action,
+                        None => {
+                            self.defer_next_pending = false;
+                            self.deferred_tasks.push_back(stream);
+                            break;
+                        }
+                    }
+                } else {
+                    iced::futures::executor::block_on(stream.next())
+                };
+                let Some(action) = action else { break };
                 match action {
                     runtime::Action::Output(message) => {
                         if self.hold_completions {
                             self.held_completions.push_back(message);
                             continue;
                         }
-                        pending.push_back(self.desktop.update(message));
+                        if let Some(next) = runtime::task::into_stream(self.desktop.update(message))
+                        {
+                            pending.push_back(next);
+                        }
                         let error = self.take_new_application_error();
                         failure = failure.or(error);
                     }

@@ -243,13 +243,7 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
 
     let title = harness.active_editor_tab_title().unwrap();
     harness
-        .right_click_text(HarnessWindow::Project, &title)
-        .unwrap();
-    harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .unwrap();
-    harness
-        .select_editor_text(HarnessWindow::Project, EditorPane::Companion, "ordinary")
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "ordinary")
         .unwrap();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::FontFamily)
@@ -264,14 +258,7 @@ fn inline_fonts_and_contextual_managers_preserve_writing_and_saved_data() {
         .unwrap();
     let shared = harness.active_editor_body().unwrap();
     assert!(shared.contains("data-font-family=\"monospace\">ordinary"));
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
-        .unwrap();
-    assert_eq!(harness.active_editor_body().unwrap(), shared);
-    capture(&harness, "font-two-panes-light");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
-        .unwrap();
+    capture(&harness, "font-single-editor-light");
 
     harness
         .resize(HarnessWindow::Project, 1280.0, 720.0)

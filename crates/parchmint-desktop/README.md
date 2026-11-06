@@ -22,6 +22,13 @@ window and draft open with retry, keep-working, and exit-without-saving choices.
 Exiting without saving releases the project lease and preserves existing recovery
 records.
 
+Assistant conversations and drafts are stored separately under application data,
+keyed by project ID and canonical project path. Writes are coalesced and flushed
+before a request is sent and before project close. Interrupted requests are
+retained for review and are never resent automatically. The store contains
+conversation text and cited context, but not API keys; copying a project does
+not copy its conversation history.
+
 ## Test controls and diagnostics
 
 Tests inject services through `DesktopBootstrap::new` or

@@ -30,8 +30,9 @@ cargo run --locked -j 1 -p parchmint-ui-verification -- native-capture --desktop
 ```
 
 Application or editor-mount failures stop capture with an error. Project targets
-require `--project` and navigate a real project; split-pane and recovery fixtures
-are not fabricated.
+require `--project` and navigate a real project; recovery fixtures are not
+fabricated. The `editor-assistant-default` fixture is headless-only because
+native capture cannot yet select the Assistant tab.
 
 The compositor may clamp window dimensions. `--require-size WIDTHxHEIGHT` rejects
 mismatches after writing the actual screenshot. Supply `--logical-width` and

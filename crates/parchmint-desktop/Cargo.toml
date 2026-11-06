@@ -22,6 +22,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+parchmint-assistant-api = { path = "../parchmint-assistant-api" }
+parchmint-assistant-budget = { path = "../parchmint-assistant-budget" }
+parchmint-assistant-core = { path = "../parchmint-assistant-core" }
+parchmint-assistant-http = { path = "../parchmint-assistant-http" }
 parchmint-application = { path = "../parchmint-application" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-diagnostics = { path = "../parchmint-diagnostics", optional = true }
@@ -48,6 +52,8 @@ parchmint-ui-api = { path = "../parchmint-ui-api" }
 parchmint-ui-iced = { path = "../parchmint-ui-iced" }
 parchmint-workspace-state = { path = "../parchmint-workspace-state" }
 sha2.workspace = true
+serde_json.workspace = true
+chrono = "=0.4.42"
 
 [dev-dependencies]
 parchmint-editor-core = { path = "../parchmint-editor-core" }

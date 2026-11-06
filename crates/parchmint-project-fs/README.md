@@ -16,6 +16,10 @@ reads, flushes, replacements, and reconciliation. `AtomicFileOps::remove` and
 History, recovery, search, and save services without taking a second lock.
 The desktop selects the native implementations.
 
+`NativeProjectFileSystem::read_bounded` reads through the same checked project
+boundary while enforcing a byte limit; the desktop uses it for opaque research
+originals before validating their manifest hashes.
+
 ## Write transaction
 
 ```text

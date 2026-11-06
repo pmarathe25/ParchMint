@@ -1839,6 +1839,23 @@ impl MountedEditorHost {
         )
     }
 
+    /// Scrolls just enough to reveal a document position using retained layout.
+    pub fn reveal_position(&self, position: DocumentPosition) -> Result<(), EditorError> {
+        if self.surface.geometry().caret(position).is_none() {
+            return Err(EditorError::InvalidCommand {
+                reason: "document position has no editor geometry",
+            });
+        }
+        ensure_caret_visible(
+            &self.adapter,
+            self.config.session(),
+            &self.surface,
+            self.config.view(),
+            position,
+        )?;
+        self.refresh()
+    }
+
     /// Releases input ownership when another document pane becomes active.
     pub fn blur(&self) -> Result<(), EditorError> {
         if self.surface.is_focused() {

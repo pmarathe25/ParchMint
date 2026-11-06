@@ -63,6 +63,8 @@ macro_rules! stable_id {
 stable_id!(ProjectId);
 stable_id!(NodeId);
 stable_id!(DocumentId);
+stable_id!(ResearchSourceId);
+stable_id!(CheckDecisionId);
 stable_id!(StyleId);
 stable_id!(MetadataFieldId);
 stable_id!(BlockId);
@@ -93,10 +95,17 @@ impl NodeId {
         Self(bytes)
     }
 
+    pub const fn lore_root() -> Self {
+        let mut bytes = Self::RESEARCH_ROOT_BYTES;
+        bytes[15] = 4;
+        Self(bytes)
+    }
+
     pub fn is_fixed_root(self) -> bool {
         self == Self::manuscript_root()
             || self == Self::research_root()
             || self == Self::unfiled_root()
+            || self == Self::lore_root()
     }
 }
 

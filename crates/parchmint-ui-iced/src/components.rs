@@ -492,8 +492,6 @@ pub(crate) fn context_action<'a, Message: Clone + 'a>(
         "Paste without formatting" => "edit.paste-plain",
         "Select all" => "edit.select-all",
         "Rename" => "outline.rename",
-        "Open beside" => "outline.open-beside",
-        "Move to other pane" => "tab.move-pane",
         "Close tab" => "tab.close",
         "New document" => "outline.document",
         "New group" => "outline.group",

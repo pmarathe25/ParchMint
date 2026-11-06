@@ -4,7 +4,7 @@ use std::{
     process::{Command as ProcessCommand, ExitCode},
 };
 
-use parchmint_ui_iced::{VisualAppearance, VisualTarget, capture_visual};
+use parchmint_ui_iced::{VisualAppearance, VisualTarget, capture_visual, visual_target_spec};
 use parchmint_ui_verification::{
     compare, decode_png, diff_image, encode_png, passes_acceptance, write_report,
 };
@@ -106,6 +106,12 @@ fn capture_native(arguments: NativeCaptureArguments) -> Result<ExitCode, String>
             arguments.output.display()
         ));
     }
+    if !visual_target_spec(arguments.target).production_native {
+        return Err(format!(
+            "{} is not available for native capture",
+            arguments.target.name()
+        ));
+    }
     let target = native_target(arguments.target);
     if target != "launcher" && arguments.project.is_none() {
         return Err(format!(
@@ -169,9 +175,9 @@ fn capture_native(arguments: NativeCaptureArguments) -> Result<ExitCode, String>
 fn native_target(target: VisualTarget) -> &'static str {
     match target {
         VisualTarget::Launcher => "launcher",
-        VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::ErrorRecovery => {
-            "editor"
-        }
+        VisualTarget::EditorSingle
+        | VisualTarget::EditorAssistant
+        | VisualTarget::ErrorRecovery => "editor",
         VisualTarget::Cards => "cards",
         VisualTarget::GlobalSearch => "global-search",
         VisualTarget::History => "history",

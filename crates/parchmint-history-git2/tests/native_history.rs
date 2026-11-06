@@ -778,6 +778,37 @@ fn line_endings_are_normalized_without_changing_checkpoint_identity() {
 }
 
 #[test]
+fn research_originals_are_checkpointed_and_restored_byte_for_byte() {
+    use parchmint_project_format::CanonicalRelativePath;
+
+    let project = LockedProject::new("opaque-original");
+    let path = "research/originals/0123456789abcdef0123456789abcdef.bin";
+    let original = b"original\r\nbytes\x00\xff\r\nend";
+    let version = ProjectVersion::named("Original research").with_opaque_resource(path, original);
+    project.write(&version);
+    let store = project.initialize();
+    let checkpoint_id = checkpoint(&store, 1, &version, CheckpointCategory::ExplicitSave).unwrap();
+    let path = CanonicalRelativePath::parse(path).unwrap();
+    assert_eq!(
+        store.read_resource(checkpoint_id, &path).unwrap().bytes,
+        original
+    );
+    let changed = ProjectVersion::named("Changed research")
+        .with_opaque_resource(path.as_str(), b"changed\r\nbytes\0");
+    project.write(&changed);
+    checkpoint(&store, 2, &changed, CheckpointCategory::ExplicitSave).unwrap();
+    let restore = store.restore(checkpoint_id).unwrap();
+    let restored = restore
+        .writes()
+        .writes
+        .iter()
+        .find(|write| write.path == path.as_str())
+        .unwrap();
+    assert_eq!(restored.bytes, original);
+    store.verify().unwrap();
+}
+
+#[test]
 fn maintenance_honors_its_object_budget_and_retains_every_checkpoint() {
     let project = LockedProject::new("maintenance");
     let store = project.initialize();

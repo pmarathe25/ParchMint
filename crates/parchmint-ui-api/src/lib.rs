@@ -9,12 +9,13 @@ use std::{
     error::Error,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
 };
 
 use parchmint_application::{
     DocumentSnapshot, DocumentVisibility, GlobalReplacement, ProjectCommandDispatcher,
 };
+use parchmint_assistant_api::{AssistantError, AssistantMode, AssistantResponse, ContextPassage};
 use parchmint_domain::Project;
 use parchmint_editor_api::EditorAdapter;
 use parchmint_editor_api::EditorRevision;
@@ -22,7 +23,7 @@ use parchmint_export_api::ExportRunOptions;
 use parchmint_export_api::Exporter;
 use parchmint_history_api::{CheckpointId, HistoryStore};
 use parchmint_platform_api::{
-    ApplicationPathService, ClipboardService, DialogService, ExternalOpenService,
+    ApplicationPathService, ClipboardService, CredentialStore, DialogService, ExternalOpenService,
     MenuActivationService, MenuService, SystemAppearanceEventService, SystemAppearanceService,
     UntrustedPathSelection, WindowCapability,
 };
@@ -33,9 +34,9 @@ use parchmint_search_api::SearchIndex;
 use parchmint_workspace_state::WorkspaceStateStore;
 
 pub use parchmint_application::{
-    CreateDocumentWorkflow, CreatedDocumentRevision, DeleteSubtreesWorkflow,
-    DeletedSubtreesRevision, DuplicateSubtreesWorkflow, DuplicatedSubtreesRevision,
-    DurableProjectionAck, MoveNodeWorkflow, MoveNodesWorkflow,
+    CreateDocumentWorkflow, CreateResearchDocumentWorkflow, CreatedDocumentRevision,
+    DeleteSubtreesWorkflow, DeletedSubtreesRevision, DuplicateSubtreesWorkflow,
+    DuplicatedSubtreesRevision, DurableProjectionAck, MoveNodeWorkflow, MoveNodesWorkflow,
     PersistenceRecoveryState as ProjectRecoveryState,
     PersistenceRevision as ProjectPersistenceRevision, PersistenceSaveHandle as ProjectSaveHandle,
     PersistenceSaveKind as ProjectSaveKind, PersistenceSavedRevision as SavedProjectRevision,
@@ -203,13 +204,27 @@ pub struct DocumentSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectQueryError {
     message: String,
+    before_mutation: bool,
 }
 
 impl ProjectQueryError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            before_mutation: false,
         }
+    }
+
+    /// The operation failed before it changed project state.
+    pub fn not_started(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            before_mutation: true,
+        }
+    }
+
+    pub fn is_not_started(&self) -> bool {
+        self.before_mutation
     }
 }
 
@@ -228,6 +243,15 @@ pub trait ProjectSnapshotQuery: Send + Sync {
     /// Materializes every live document body for an off-loop read workflow.
     fn snapshot_with_documents(&self) -> Result<ProjectSnapshot, ProjectQueryError> {
         self.snapshot()
+    }
+
+    /// Returns last-durable source bytes after the resource owner checks them.
+    /// Callers must also compare their captured manifest metadata before use.
+    fn research_original_bytes(
+        &self,
+        _source_id: parchmint_domain::ResearchSourceId,
+    ) -> Result<Vec<u8>, ProjectQueryError> {
+        Err(ProjectQueryError::new("Research original is unavailable"))
     }
 
     /// Loads and validates one canonical document body for this exact session.
@@ -309,13 +333,68 @@ pub struct ProjectDuplicateWorkflowSnapshot {
     pub document_ids: BTreeMap<parchmint_domain::DocumentId, parchmint_domain::DocumentId>,
 }
 
+/// Explicit author-selected URL and destination for one original source.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FetchResearchOriginalWorkflow {
+    pub document: CreateDocumentWorkflow,
+    pub source_id: parchmint_domain::ResearchSourceId,
+    pub source_url: String,
+    pub body: String,
+}
+
+impl fmt::Debug for FetchResearchOriginalWorkflow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FetchResearchOriginalWorkflow")
+            .field("document", &self.document)
+            .field("source_id", &self.source_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Production-owned workflows that must coordinate domain, document, and
 /// storage state rather than exposing low-level write plans to the UI.
 pub trait ProjectWorkflowPort: Send + Sync {
+    fn set_continuity_decision(
+        &self,
+        _record: parchmint_domain::ContinuityDecisionRecord,
+        _expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        Err(ProjectQueryError::new(
+            "Continuity decisions are unavailable",
+        ))
+    }
+
     fn create_document(
         &self,
         request: CreateDocumentWorkflow,
     ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError>;
+
+    fn create_research_document(
+        &self,
+        _request: CreateResearchDocumentWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        Err(ProjectQueryError::new("Research import is unavailable"))
+    }
+
+    fn fetch_research_original(
+        &self,
+        _request: FetchResearchOriginalWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        Err(ProjectQueryError::new(
+            "Original-source import is unavailable",
+        ))
+    }
+
+    fn save_research_original(
+        &self,
+        _source_id: parchmint_domain::ResearchSourceId,
+        _destination: parchmint_platform_api::UntrustedPathSelection,
+    ) -> Result<(), ProjectQueryError> {
+        Err(ProjectQueryError::new(
+            "Saving the original source is unavailable",
+        ))
+    }
 
     fn restore_checkpoint(
         &self,
@@ -557,6 +636,8 @@ impl ApplicationServices {
 /// Platform services used by a desktop UI.
 #[derive(Clone)]
 pub struct PlatformServices {
+    pub credentials: Option<Arc<dyn CredentialStore>>,
+    pub session_credentials: Option<Arc<dyn CredentialStore>>,
     pub menus: Arc<dyn MenuService>,
     pub menu_activations: Option<Arc<dyn MenuActivationService>>,
     pub dialogs: Arc<dyn DialogService>,
@@ -574,6 +655,7 @@ pub struct PlatformServices {
 /// short-lived typed view after checking the exact session generation.
 #[derive(Clone)]
 pub struct ProjectUiServices {
+    assistant: Option<Arc<dyn AssistantWorkflowPort>>,
     application: ApplicationServices,
     query: Arc<dyn ProjectSnapshotQuery>,
     history: Arc<dyn HistoryStore>,
@@ -615,6 +697,7 @@ impl ProjectUiServices {
         platform: PlatformServices,
     ) -> Self {
         Self {
+            assistant: None,
             application,
             query,
             history,
@@ -633,6 +716,262 @@ impl ProjectUiServices {
             appearance,
             platform,
         }
+    }
+
+    pub fn with_assistant(mut self, assistant: Arc<dyn AssistantWorkflowPort>) -> Self {
+        self.assistant = Some(assistant);
+        self
+    }
+}
+
+/// Maximum captured selection size; Check reserves remaining room for its target.
+pub const MAX_ASSISTANT_SELECTION_BYTES: usize = 32 * 1024;
+
+/// Explicit, one-request author permission to include notes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantExplicitNotes {
+    Document {
+        document: parchmint_domain::DocumentId,
+        project_revision: u64,
+        tree_hash: [u8; 32],
+    },
+    Project {
+        project_revision: u64,
+        tree_hash: [u8; 32],
+    },
+}
+
+/// The hierarchy facts that determine which documents a scope can include.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AssistantNoteTreeEntry {
+    pub node: parchmint_domain::NodeId,
+    pub parent: Option<parchmint_domain::NodeId>,
+    /// 0 = root, 1 = group, 2 = document.
+    pub kind: u8,
+    pub root_section: Option<parchmint_domain::ProjectSection>,
+    pub document: Option<parchmint_domain::DocumentId>,
+}
+
+pub fn assistant_note_tree_hash(
+    project_id: parchmint_domain::ProjectId,
+    mut entries: Vec<AssistantNoteTreeEntry>,
+) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    entries.sort_by_key(|entry| entry.node);
+    let mut digest = Sha256::new();
+    digest.update(b"parchmint.note-tree.v1\0");
+    digest.update(project_id.as_bytes());
+    for entry in entries {
+        digest.update(entry.node.as_bytes());
+        let section = match entry.root_section {
+            None => 0,
+            Some(parchmint_domain::ProjectSection::Manuscript) => 1,
+            Some(parchmint_domain::ProjectSection::Lore) => 2,
+            Some(parchmint_domain::ProjectSection::Research) => 3,
+            Some(parchmint_domain::ProjectSection::Unfiled) => 4,
+        };
+        digest.update([
+            entry.kind,
+            section,
+            u8::from(entry.parent.is_some()),
+            u8::from(entry.document.is_some()),
+        ]);
+        if let Some(parent) = entry.parent {
+            digest.update(parent.as_bytes());
+        }
+        if let Some(document) = entry.document {
+            digest.update(document.as_bytes());
+        }
+    }
+    digest.finalize().into()
+}
+
+/// One author-requested assistant operation against this project session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssistantWorkflowRequest {
+    pub mode: AssistantMode,
+    pub prompt: String,
+    pub target: Option<parchmint_domain::NodeId>,
+    /// Optional evidence scope. Check also includes its separate target.
+    pub context_scope: Option<parchmint_domain::NodeId>,
+    /// Exact editor selection captured at submission, when selection-only is enabled.
+    pub selected_text: Option<AssistantSelectedText>,
+    /// Explicit project nodes, expanded to their current descendant documents.
+    pub pinned_context: Vec<parchmint_domain::NodeId>,
+    /// Exclusions take precedence over every implicit or pinned context source.
+    pub excluded_context: Vec<parchmint_domain::NodeId>,
+    pub history: Vec<AssistantHistoryTurn>,
+    /// These are granted only in response to an explicit author request.
+    pub include_notes: bool,
+    /// Set only by a local user control; never inferred from provider output.
+    pub explicit_notes: Option<AssistantExplicitNotes>,
+    pub create_note: bool,
+    /// Captured editor revisions, including edits not yet persisted.
+    pub live_documents: Vec<CanonicalProjection>,
+    /// An explicit request to propose an edit to one verified Check passage.
+    pub edit_proposal: Option<AssistantEditProposalRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssistantEditProposalRequest {
+    pub finding: parchmint_assistant_api::CheckFinding,
+    pub scope: parchmint_assistant_api::CheckScope,
+    pub context: Vec<ContextPassage>,
+    pub evidence_index: usize,
+}
+
+/// The target is established from local source evidence, not model output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantEditProposalTarget {
+    pub document: parchmint_domain::DocumentId,
+    pub revision: u64,
+    pub start: u64,
+    pub end: u64,
+    pub original: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantSelectedText {
+    pub document: parchmint_domain::DocumentId,
+    pub revision: EditorRevision,
+    pub text: String,
+}
+
+/// A previous exchange, tagged with the actual destination and note access.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantHistoryTurn {
+    pub question: String,
+    pub answer: String,
+    pub provider_binding: String,
+    pub notes_derived: bool,
+}
+
+/// Response and exact evidence captured before the request was dispatched.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AssistantWorkflowResult {
+    pub response: AssistantResponse,
+    /// Locally validated Check findings; absent for older or unstructured results.
+    #[serde(default)]
+    pub check_report: Option<parchmint_assistant_api::CheckReport>,
+    #[serde(default)]
+    pub check_report_invalid: bool,
+    pub context: Vec<ContextPassage>,
+    pub context_truncated: bool,
+    /// Local extraction limitations for sources in this request's allowed scope.
+    #[serde(default)]
+    pub context_warnings: Vec<String>,
+    pub estimated_cost_micros: Option<u64>,
+    pub estimated_period_total_micros: Option<u64>,
+    pub usage_warning: Option<String>,
+    pub web_retrieved_at_unix_seconds: Option<u64>,
+    pub provider_binding: String,
+    pub notes_derived: bool,
+    /// Session-owned proposal target; older saved conversations lack this field.
+    #[serde(skip)]
+    pub edit_proposal_target: Option<AssistantEditProposalTarget>,
+}
+
+/// Private application-data state, never part of a project or its History.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AssistantConversationState {
+    pub threads: Vec<AssistantSavedThread>,
+    #[serde(default)]
+    pub research_import: Option<AssistantSavedResearchImport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AssistantSavedResearchForm {
+    Summary,
+    SourceLink,
+    Original,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AssistantSavedResearchImport {
+    pub nonce: [u8; 16],
+    pub title: String,
+    pub parent_id: String,
+    pub question: String,
+    pub answer: String,
+    pub sources: Vec<parchmint_assistant_api::WebCitation>,
+    pub form: AssistantSavedResearchForm,
+    pub retrieved_at: u64,
+    pub manual_url: Option<String>,
+    pub original_source: usize,
+    #[serde(default)]
+    pub fresh_id_on_edit: bool,
+    /// A save started before the snapshot was written; completion is unknown.
+    pub commit_started: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AssistantSavedThread {
+    pub mode: AssistantMode,
+    /// Empty only when loading a version-1, single-thread-per-mode file.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub auto_title: bool,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub research_import: Option<AssistantSavedResearchImport>,
+    pub draft: String,
+    pub turns: Vec<AssistantSavedTurn>,
+    pub note_proposal: Option<String>,
+    pub interrupted_prompts: Vec<String>,
+    #[serde(default)]
+    pub pinned_context: Vec<String>,
+    #[serde(default)]
+    pub excluded_context: Vec<String>,
+    #[serde(default)]
+    pub context_scope: Option<String>,
+    #[serde(default)]
+    pub selection_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AssistantSavedTurn {
+    pub question: String,
+    pub result: AssistantWorkflowResult,
+}
+
+/// Blocking work belongs on a worker, and callers must recheck their session
+/// and request generations when accepting results.
+pub trait AssistantWorkflowPort: Send + Sync {
+    /// Returns a snapshot loaded on the project-open worker; no disk I/O here.
+    fn conversation_snapshot(&self) -> Result<AssistantConversationState, String> {
+        Ok(AssistantConversationState::default())
+    }
+    /// Enqueues a private application-data snapshot without blocking the UI.
+    fn queue_conversation(&self, _state: AssistantConversationState) -> Result<(), String> {
+        Ok(())
+    }
+    /// Nonblocking status: true while a queued write is in progress.
+    fn conversation_write_pending(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    /// Runs on a worker before dispatch and project close.
+    fn flush_conversation(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn run(
+        &self,
+        request: AssistantWorkflowRequest,
+        cancelled: &AtomicBool,
+    ) -> Result<AssistantWorkflowResult, AssistantError>;
+
+    /// Provisional text is transient and must not be persisted or treated as
+    /// validated evidence. Implementations may omit progress entirely.
+    fn run_with_progress(
+        &self,
+        request: AssistantWorkflowRequest,
+        cancelled: &AtomicBool,
+        _progress: &mut dyn FnMut(&str),
+    ) -> Result<AssistantWorkflowResult, AssistantError> {
+        self.run(request, cancelled)
     }
 }
 
@@ -698,6 +1037,13 @@ impl ProjectUiAccess<'_> {
     fn services(&self) -> Result<&ProjectUiServices, StaleProjectSession> {
         self.ports.authorize()?;
         Ok(self.ports.services.as_ref())
+    }
+
+    pub fn assistant<R>(
+        &self,
+        use_service: impl FnOnce(Option<&dyn AssistantWorkflowPort>) -> R,
+    ) -> Result<R, StaleProjectSession> {
+        Ok(use_service(self.services()?.assistant.as_deref()))
     }
 
     pub fn snapshot<R>(
@@ -897,6 +1243,8 @@ impl PlatformServices {
         system_appearance: Arc<dyn SystemAppearanceService>,
     ) -> Self {
         Self {
+            credentials: None,
+            session_credentials: None,
             menus,
             menu_activations: None,
             dialogs,
@@ -906,6 +1254,16 @@ impl PlatformServices {
             system_appearance,
             system_appearance_events: None,
         }
+    }
+
+    pub fn with_credentials(mut self, credentials: Arc<dyn CredentialStore>) -> Self {
+        self.credentials = Some(credentials);
+        self
+    }
+
+    pub fn with_session_credentials(mut self, credentials: Arc<dyn CredentialStore>) -> Self {
+        self.session_credentials = Some(credentials);
+        self
     }
 
     pub fn with_system_appearance_events(

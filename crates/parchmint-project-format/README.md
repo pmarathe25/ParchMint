@@ -10,6 +10,7 @@ project.toml
 styles.css
 dictionary.txt
 manuscript/**/*.html
+lore/**/*.html
 research/**/*.html
 unfiled/**/*.html
 annotations/<document-id>.json
@@ -53,6 +54,14 @@ encoding, and hashing.
 - Resource paths are relative; traversal, case collisions, and
   Unicode-normalization collisions are rejected.
 - Invalid input and unknown newer formats fail without modifying project files.
+
+The path pattern `research/originals/<32-lowercase-hex-id>.bin` is reserved for
+opaque source resources. Its identity is independent of the source filename, and
+its bytes are encoded and decoded without normalization. Manifest entries carry
+the associated document, provenance, byte length, and SHA-256 hash; whole-project
+decoding and desktop project opening reject missing, altered, or unlisted
+originals. The desktop Research workflow creates these resources through an
+ordinary atomic project save.
 
 Document decoding also derives rendered word counts for persistence and UI
 summaries. Markup, attributes, and empty paragraphs do not count as prose;

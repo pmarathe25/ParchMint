@@ -19,11 +19,12 @@ use parchmint_ui_api::HistoryMaintenanceStatus;
 use crate::components::{semantic_button as button, semantic_text_input as text_input};
 
 use crate::{
-    CommentAnchor, ContentState, DragDestination, EditorMessage, F6Region, HarnessTarget,
-    HierarchyItemKind, HierarchyRowKind, MetadataFieldApplicability, MetadataFieldTextKind, Point,
-    ProjectMessage, ProjectModal, ProjectWorkspace, ReplacementCheckState,
-    ReplacementPreviewRowKind, RestoreLocation, RibbonDestination, SaveState, SelectionGesture,
-    SettingsCategory, SettingsDetail, ShellLayout, SidebarSurface, StatusCount, StyleProperty,
+    AssistantDockTab, CommentAnchor, ContentState, DragDestination, EditorMessage, F6Region,
+    HarnessTarget, HierarchyItemKind, HierarchyRowKind, MetadataFieldApplicability,
+    MetadataFieldTextKind, Point, ProjectMessage, ProjectModal, ProjectWorkspace,
+    ReplacementCheckState, ReplacementPreviewRowKind, RestoreLocation, RibbonDestination,
+    SaveState, SelectionGesture, SettingsCategory, SettingsDetail, ShellLayout, SidebarSurface,
+    StatusCount, StyleProperty,
     components::{self, ButtonKind, Interaction, Surface},
     design_tokens::{
         ParchMintTheme, RIBBON_HEIGHT, SPACING_4, SPACING_8, SPACING_12, SPACING_16, SPACING_24,
@@ -41,6 +42,10 @@ pub(crate) enum ProjectSurfaceMessage {
     Project(ProjectMessage),
     EditorCenter(EditorCenterMessage),
     Navigate(RibbonDestination),
+    OpenAssistantSettings,
+    OpenAssistantSource(String),
+    ReturnToWriting,
+    SaveResearchOriginal(parchmint_domain::ResearchSourceId),
     OpenDocumentHistory(String),
     ShowProjectChooser,
     ToggleExplorer,
@@ -56,7 +61,6 @@ pub(crate) enum ProjectSurfaceMessage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarPanel {
     Explorer,
-    Editor,
     Inspector,
 }
 
@@ -151,6 +155,25 @@ pub(crate) fn native_project_surface<'a>(
     )
 }
 
+pub(crate) fn editor_measure_width(layout: &ShellLayout) -> u32 {
+    // The rendered sidebars use their requested widths, even when ShellLayout's
+    // abstract pane geometry clamps them to preserve a wider center.
+    layout
+        .ribbon()
+        .width()
+        .saturating_sub(48)
+        .saturating_sub(if layout.explorer_is_visible() {
+            layout.explorer_width()
+        } else {
+            0
+        })
+        .saturating_sub(if layout.inspector_is_visible() {
+            layout.inspector_width()
+        } else {
+            0
+        })
+}
+
 /// Visual references have a fixed project name, while native integration owns
 /// the live window title. Keeping the fixture label here avoids substituting
 /// a verification name for a production project.
@@ -160,8 +183,10 @@ pub(crate) fn verification_project_surface<'a>(
     destination: RibbonDestination,
     theme: ParchMintTheme,
     editor_child: Element<'a, ProjectSurfaceMessage>,
+    assistant_visible: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
-    let layout = ShellLayout::for_window(1440, 900);
+    let mut layout = ShellLayout::for_window(1440, 900);
+    layout.set_inspector_visible(assistant_visible);
     project_surface_with_layout(
         workspace,
         destination,
@@ -1284,28 +1309,16 @@ fn hierarchy_context_overlay<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let base = content;
     if let Some((pane, document_id, point)) = workspace.tab_context() {
-        let actions = column![
-            components::context_action(
-                "Close tab",
-                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                    EditorMessage::CloseTab {
-                        pane: *pane,
-                        document_id: document_id.clone()
-                    }
-                )),
-                theme
-            ),
-            components::context_action(
-                "Move to other pane",
-                ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
-                    EditorMessage::MoveTabToOtherPane {
-                        pane: *pane,
-                        document_id: document_id.clone()
-                    }
-                )),
-                theme
-            ),
-        ]
+        let actions = column![components::context_action(
+            "Close tab",
+            ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                EditorMessage::CloseTab {
+                    pane: *pane,
+                    document_id: document_id.clone()
+                }
+            )),
+            theme
+        ),]
         .spacing(2);
         return stack![
             base,
@@ -1346,19 +1359,11 @@ fn hierarchy_context_overlay<'a>(
     let id = node.id.to_owned();
     let mut actions = column![].spacing(2);
     if node.kind == HierarchyRowKind::Document {
-        actions = actions
-            .push(context_menu_button(
-                "Open",
-                ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(id.clone())),
-                theme,
-            ))
-            .push(context_menu_button(
-                "Open beside",
-                ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNodeInCompanion(
-                    id.clone(),
-                )),
-                theme,
-            ));
+        actions = actions.push(context_menu_button(
+            "Open",
+            ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(id.clone())),
+            theme,
+        ));
         if let Some(document) = node.document_id {
             actions = actions.push(context_menu_button(
                 "History",
@@ -4192,6 +4197,197 @@ fn settings_content<'a>(
 ) -> Element<'a, ProjectSurfaceMessage> {
     let settings = workspace.settings();
     match category {
+        SettingsCategory::AiAssistant => {
+            use parchmint_preferences::{AssistantAuthentication, AssistantProvider};
+            let state = workspace.assistant_settings();
+            let mut content = column![
+                page_title("AI assistant"),
+                components::muted_label("Project context → provider")
+            ]
+            .spacing(12);
+            let mut providers = row![].spacing(8);
+            for (provider, label) in [
+                (AssistantProvider::OpenAi, "OpenAI"),
+                (AssistantProvider::Anthropic, "Anthropic"),
+                (AssistantProvider::OpenAiCompatible, "OpenAI-compatible"),
+            ] {
+                let selected = state.profile.provider == provider;
+                providers = providers.push(
+                    button(text(label).size(13))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetAssistantProvider(provider),
+                        ))
+                        .style(move |_, status| {
+                            flat_selection_button_style(theme, status, selected)
+                        }),
+                );
+            }
+            content = content.push(providers).push(text("Model").size(13)).push(
+                text_input("Model identifier", &state.profile.model)
+                    .on_input(|value| {
+                        ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantModel(value))
+                    })
+                    .padding(8)
+                    .size(14),
+            );
+            if state.profile.provider == AssistantProvider::OpenAiCompatible {
+                content = content
+                    .push(text("API endpoint").size(13))
+                    .push(
+                        text_input("https://example.com/v1", &state.profile.endpoint)
+                            .on_input(|value| {
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetAssistantEndpoint(value),
+                                )
+                            })
+                            .padding(8)
+                            .size(14),
+                    )
+                    .push(
+                        checkbox(state.profile.authentication == AssistantAuthentication::None)
+                            .label("Local endpoint does not require an API key")
+                            .on_toggle(|enabled| {
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetAssistantAuthentication(if enabled {
+                                        AssistantAuthentication::None
+                                    } else {
+                                        AssistantAuthentication::ApiKey
+                                    }),
+                                )
+                            }),
+                    );
+                content = content.push(
+                    checkbox(state.profile.compatible_function_tools)
+                        .label("Provider supports function tools")
+                        .on_toggle(|enabled| {
+                            ProjectSurfaceMessage::Project(
+                                ProjectMessage::SetAssistantFunctionTools(enabled),
+                            )
+                        }),
+                );
+                content = content.push(
+                    checkbox(state.profile.compatible_streaming)
+                        .label("Stream responses")
+                        .on_toggle(|enabled| {
+                            ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantStreaming(
+                                enabled,
+                            ))
+                        }),
+                );
+            }
+            if state.profile.authentication == AssistantAuthentication::ApiKey {
+                content = content
+                    .push(text("API key").size(13))
+                    .push(
+                        text_input("Enter a new API key", state.key.expose())
+                            .secure(true)
+                            .on_input(|value| {
+                                ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantKey(
+                                    crate::AssistantSecretDraft::new(value),
+                                ))
+                            })
+                            .padding(8)
+                            .size(14),
+                    )
+                    .push(
+                        checkbox(state.session_only)
+                            .label("Use this key for this session only")
+                            .on_toggle(|value| {
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetAssistantSessionOnly(value),
+                                )
+                            }),
+                    );
+            }
+            content = content.push(
+                button(text("Usage settings").size(13))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleAssistantBudget,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+            );
+            if state.show_budget {
+                if state.profile.provider != AssistantProvider::OpenAi
+                    || state.profile.model.trim() != "gpt-6.1-terra"
+                {
+                    content = content.push(components::muted_label(
+                        "Cost limit unavailable for this model",
+                    ));
+                }
+                content = content
+                    .push(text("ParchMint monthly limit (USD)").size(13))
+                    .push(
+                        text_input("80.00", &state.budget_draft)
+                            .on_input(|value| {
+                                ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantBudget(
+                                    value,
+                                ))
+                            })
+                            .padding(8)
+                            .size(13),
+                    )
+                    .push(text("Warning amount (USD)").size(13))
+                    .push(
+                        text_input("60.00", &state.warning_draft)
+                            .on_input(|value| {
+                                ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantWarning(
+                                    value,
+                                ))
+                            })
+                            .padding(8)
+                            .size(13),
+                    )
+                    .push(text("Reset day of month (UTC, 1–28)").size(13))
+                    .push(
+                        text_input("1", &state.reset_draft)
+                            .on_input(|value| {
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::SetAssistantResetDay(value),
+                                )
+                            })
+                            .padding(8)
+                            .size(13),
+                    );
+            }
+            if let Some(error) = &state.error {
+                content = content.push(text(error).size(13).color(theme.palette().error));
+            }
+            if state.saved_profile.credential_reference.is_some() {
+                content = content.push(
+                    button(text("Remove saved key").size(13))
+                        .on_press_maybe((!state.busy).then_some(ProjectSurfaceMessage::Project(
+                            ProjectMessage::RemoveAssistantKey,
+                        )))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+            content = content.push(
+                button(text("Save").size(13))
+                    .on_press_maybe((!state.busy).then_some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::SaveAssistantSettings,
+                    )))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Primary,
+                            interaction(status, false),
+                        )
+                    }),
+            );
+            crate::scroll_gate::smooth(scrollable(content).height(Length::Fill))
+        }
         SettingsCategory::Shortcuts => {
             let mut controls = column![
                 row![
@@ -4222,6 +4418,13 @@ fn settings_content<'a>(
             let query = settings.shortcut_query.to_lowercase();
             let mut group = "";
             for command in parchmint_preferences::shortcut_commands() {
+                // Keep legacy IDs readable without presenting pane commands.
+                if matches!(
+                    command.id,
+                    "view.companion" | "tab.move-pane" | "outline.open-beside"
+                ) {
+                    continue;
+                }
                 if !format!("{} {}", command.label, command.group)
                     .to_lowercase()
                     .contains(&query)
@@ -5634,21 +5837,37 @@ fn inspector<'a>(
     compact: bool,
 ) -> Element<'a, ProjectSurfaceMessage> {
     let selected = workspace.inspector_node_id();
-    let content = if let Some(selected) = selected {
+    let mut tabs = row![].spacing(2);
+    for tab in [
+        AssistantDockTab::Ask,
+        AssistantDockTab::Check,
+        AssistantDockTab::Research,
+        AssistantDockTab::Notes,
+    ] {
+        let active = workspace.assistant_tab() == tab;
+        tabs = tabs.push(
+            button(text(tab.label()).size(12))
+                .width(Length::Fill)
+                .padding([6, 2])
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::SelectAssistantTab(tab),
+                ))
+                .style(move |_, status| flat_selection_button_style(theme, status, active)),
+        );
+    }
+    let content = if workspace.assistant_tab() != AssistantDockTab::Notes {
+        let profile = &workspace.assistant_settings().saved_profile;
+        let configured = profile.credential_reference.is_some()
+            || profile.authentication == parchmint_preferences::AssistantAuthentication::None;
+        assistant_thread_surface(workspace, theme, configured)
+    } else if let Some(selected) = selected {
         let title = workspace.explorer().title(selected).unwrap_or("Untitled");
         let heading: Element<'a, ProjectSurfaceMessage> = if compact {
             text(format!("Notes · {title}")).size(12).into()
         } else {
             harness_target::target(
                 HarnessTarget::InspectorTitle,
-                column![
-                    text("Notes").size(14).font(Font {
-                        weight: font::Weight::Semibold,
-                        ..Font::DEFAULT
-                    }),
-                    components::muted_label(title),
-                ]
-                .spacing(2),
+                components::muted_label(title),
             )
         };
         let editor = workspace.editor();
@@ -5788,14 +6007,1354 @@ fn inspector<'a>(
         ]
         .spacing(10)
     };
+    let content = if workspace.assistant_tab() != AssistantDockTab::Notes
+        && let Some(error) = workspace.assistant_history_error()
+    {
+        let mut with_error = column![text(error).size(12).color(theme.palette().error)].spacing(10);
+        if workspace.assistant_history_touched() {
+            with_error = with_error.push(
+                button(text("Retry saving history").size(12))
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::RetryAssistantHistory,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+            );
+        }
+        with_error.push(content)
+    } else {
+        content
+    };
+    let mut panel = column![tabs].spacing(12);
+    if workspace.assistant_return().is_some() {
+        panel = panel.push(
+            button(text("← Back to writing").size(12))
+                .on_press(ProjectSurfaceMessage::ReturnToWriting)
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                }),
+        );
+    }
     focus::f6_region(
         F6Region::Inspector,
-        container(content)
+        container(panel.push(content))
             .padding(12)
             .width(width)
             .height(Length::Fill)
             .style(move |_| components::surface(theme, Surface::Sidebar, Interaction::Rest)),
     )
+}
+
+fn assistant_conversation_controls<'a>(
+    workspace: &'a ProjectWorkspace,
+    tab: AssistantDockTab,
+    theme: ParchMintTheme,
+) -> iced::widget::Column<'a, ProjectSurfaceMessage> {
+    let choices = workspace.assistant_conversation_choices(tab);
+    let thread = workspace.assistant_thread(tab);
+    let selected = thread
+        .and_then(|thread| choices.iter().find(|choice| choice.id == thread.id))
+        .map_or("Conversation", |choice| choice.label.as_str());
+    let quiet = move |_: &iced::Theme, status: iced::widget::button::Status| {
+        components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+    };
+    let selector = harness_target::target(
+        HarnessTarget::AssistantConversationPicker,
+        button(
+            row![
+                text(selected.to_owned()).size(13).width(Length::Fill),
+                icon_sized(Icon::ChevronDown, 16)
+            ]
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .width(Length::Fill)
+        .on_press(ProjectSurfaceMessage::Project(
+            ProjectMessage::ToggleAssistantConversationList(tab),
+        ))
+        .style(quiet),
+    );
+    let mut controls = column![
+        row![
+            selector,
+            stationary_tooltip::tooltip(
+                harness_target::target(
+                    HarnessTarget::AssistantNewConversation,
+                    button(text("+").size(17))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::NewAssistantConversation(tab)
+                        ))
+                        .style(quiet)
+                ),
+                container(text("New conversation").size(12)).padding([4, 6]),
+                components::surface(theme, Surface::Elevated, Interaction::Rest)
+            ),
+            stationary_tooltip::tooltip(
+                harness_target::target(
+                    HarnessTarget::AssistantConversationMenu,
+                    button(text("⋯").size(17))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ToggleAssistantConversationMenu(tab)
+                        ))
+                        .style(quiet)
+                ),
+                container(text("Conversation options").size(12)).padding([4, 6]),
+                components::surface(theme, Surface::Elevated, Interaction::Rest)
+            ),
+        ]
+        .spacing(4)
+        .align_y(iced::alignment::Vertical::Center)
+    ]
+    .spacing(6);
+    if thread.is_some_and(|thread| thread.list_open) {
+        let height = (choices.len().min(5) as f32 * 32.0).max(32.0);
+        let mut list = column![].spacing(2);
+        for choice in choices {
+            let selected = thread.is_some_and(|thread| thread.id == choice.id);
+            list = list.push(
+                button(text(choice.label).size(12))
+                    .width(Length::Fill)
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::SelectAssistantConversation { tab, id: choice.id },
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, selected),
+                        )
+                    }),
+            );
+        }
+        controls = controls.push(crate::scroll_gate::smooth(
+            scrollable(list).height(Length::Fixed(height)),
+        ));
+    }
+    if let Some(thread) = thread
+        && thread.menu_open
+    {
+        if thread.renaming {
+            let rename_id = thread.id.clone();
+            controls = controls.push(
+                row![
+                    harness_target::target(
+                        HarnessTarget::AssistantConversationName,
+                        text_input("Conversation name", &thread.rename_draft)
+                            .on_input(move |name| ProjectSurfaceMessage::Project(
+                                ProjectMessage::SetAssistantConversationName {
+                                    tab,
+                                    conversation_id: rename_id.clone(),
+                                    name
+                                }
+                            ))
+                            .on_submit(ProjectSurfaceMessage::Project(
+                                ProjectMessage::CommitAssistantConversationRename {
+                                    tab,
+                                    conversation_id: thread.id.clone()
+                                }
+                            ))
+                            .padding(6)
+                            .size(13)
+                            .width(Length::Fill)
+                    ),
+                    button(text("Save").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::CommitAssistantConversationRename {
+                                tab,
+                                conversation_id: thread.id.clone()
+                            }
+                        ))
+                        .style(quiet),
+                ]
+                .spacing(4),
+            );
+        } else if thread.confirming_delete {
+            controls = controls.push(
+                row![
+                    text("Delete conversation?").size(12),
+                    button(text("Delete").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ConfirmAssistantConversationDelete {
+                                tab,
+                                conversation_id: thread.id.clone()
+                            }
+                        ))
+                        .style(quiet),
+                    button(text("Cancel").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::CancelAssistantConversationDelete(tab)
+                        ))
+                        .style(quiet),
+                ]
+                .spacing(4),
+            );
+        } else {
+            let delete_enabled = !thread
+                .research_import
+                .as_ref()
+                .is_some_and(|draft| draft.pending || draft.uncertain);
+            controls = controls.push(
+                row![
+                    button(text("Rename").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::BeginAssistantConversationRename(tab)
+                        ))
+                        .style(quiet),
+                    button(text("Delete").size(12))
+                        .on_press_maybe(delete_enabled.then_some(ProjectSurfaceMessage::Project(
+                            ProjectMessage::BeginAssistantConversationDelete(tab)
+                        )))
+                        .style(quiet),
+                ]
+                .spacing(4),
+            );
+        }
+    }
+    controls
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssistantScopeChoice {
+    Automatic,
+    EditorSelection,
+    Item { id: String, title: String },
+}
+
+impl std::fmt::Display for AssistantScopeChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Automatic => formatter.write_str("Automatic"),
+            Self::EditorSelection => formatter.write_str("Editor selection"),
+            Self::Item { title, .. } => write!(formatter, "Item: {title}"),
+        }
+    }
+}
+
+fn assistant_thread_surface<'a>(
+    workspace: &'a ProjectWorkspace,
+    theme: ParchMintTheme,
+    configured: bool,
+) -> iced::widget::Column<'a, ProjectSurfaceMessage> {
+    let tab = workspace.assistant_tab();
+    let conversation_controls = assistant_conversation_controls(workspace, tab, theme);
+    if configured
+        && tab == AssistantDockTab::Research
+        && let Some(draft) = workspace.research_import()
+    {
+        return column![
+            conversation_controls,
+            research_import_preview(workspace, draft, theme)
+        ]
+        .spacing(10)
+        .height(Length::Fill);
+    }
+    let thread = workspace.assistant_thread(tab);
+    let conversation_id = thread.map_or_else(String::new, |thread| thread.id.clone());
+    let mut history = column![].spacing(12);
+    if tab == AssistantDockTab::Research {
+        for original in workspace.active_research_originals() {
+            history = history.push(
+                button(text(format!("Save original: {}…", original.filename)).size(12))
+                    .on_press(ProjectSurfaceMessage::SaveResearchOriginal(
+                        original.source_id,
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+            );
+        }
+    }
+    if let Some(thread) = thread {
+        for (index, turn) in thread.turns.iter().enumerate() {
+            if tab != AssistantDockTab::Check
+                || turn.question != crate::project_workspace::DEFAULT_CHECK_PROMPT
+            {
+                history = history.push(text(&turn.question).size(13));
+            }
+            history = history.push(assistant_answer_text(&turn.result.response, theme));
+            if turn.result.check_report_invalid {
+                history = history.push(components::muted_label("Unstructured check"));
+            }
+            if let Some(report) = &turn.result.check_report {
+                for (finding_index, finding) in report.findings.iter().enumerate() {
+                    let expanded = thread.expanded_findings.contains(&(index, finding_index));
+                    let category = match finding.category {
+                        parchmint_assistant_api::CheckCategory::IdentityAppearance => "Identity",
+                        parchmint_assistant_api::CheckCategory::TimeTravel => "Time & travel",
+                        parchmint_assistant_api::CheckCategory::ObjectsPossession => "Objects",
+                        parchmint_assistant_api::CheckCategory::Rules => "Rules",
+                        parchmint_assistant_api::CheckCategory::Relationships => "Relationships",
+                        parchmint_assistant_api::CheckCategory::Knowledge => "Knowledge",
+                        parchmint_assistant_api::CheckCategory::Other => "Continuity",
+                    };
+                    history = history.push(
+                        button(
+                            text(format!(
+                                "{} {} · {}",
+                                if expanded { "⌄" } else { "›" },
+                                category,
+                                finding.explanation
+                            ))
+                            .size(12),
+                        )
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::ToggleCheckFinding {
+                                conversation_id: thread.id.clone(),
+                                turn: index,
+                                finding: finding_index,
+                            },
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                    );
+                    if expanded {
+                        if let Some(uncertainty) = &finding.uncertainty {
+                            history = history.push(components::muted_label(uncertainty));
+                        }
+                        for (evidence_index, source) in finding.evidence.iter().enumerate() {
+                            let current = workspace.assistant_source_is_current(source);
+                            let proposal_here = thread.edit_proposal.as_ref().filter(|proposal| {
+                                proposal.origin.turn == index
+                                    && proposal.origin.finding == finding_index
+                                    && proposal.origin.evidence == evidence_index
+                            });
+                            let label = format!(
+                                "[{}] {}{}",
+                                source.source_id,
+                                source.title,
+                                if current { "" } else { " · changed" }
+                            );
+                            history = history.push(
+                                button(text(label).size(12))
+                                    .on_press_maybe(current.then(|| {
+                                        ProjectSurfaceMessage::Project(
+                                            ProjectMessage::OpenAssistantPassage(Box::new(
+                                                source.clone(),
+                                            )),
+                                        )
+                                    }))
+                                    .style(move |_, status| {
+                                        components::button_style(
+                                            theme,
+                                            ButtonKind::Quiet,
+                                            interaction(status, false),
+                                        )
+                                    }),
+                            );
+                            if proposal_here.is_some() {
+                                history = history.push(components::muted_label("Before"));
+                            }
+                            history = history.push(text(&source.text).size(12));
+                            if thread.edit_proposal.is_none()
+                                && thread.pending.is_none()
+                                && workspace
+                                    .check_edit_origin(
+                                        &thread.id,
+                                        index,
+                                        finding_index,
+                                        evidence_index,
+                                    )
+                                    .is_some()
+                            {
+                                history = history.push(
+                                    button(text("Propose edit").size(12))
+                                        .on_press(ProjectSurfaceMessage::Project(
+                                            ProjectMessage::ProposeCheckEdit {
+                                                conversation_id: thread.id.clone(),
+                                                turn: index,
+                                                finding: finding_index,
+                                                evidence: evidence_index,
+                                            },
+                                        ))
+                                        .style(move |_, status| {
+                                            components::button_style(
+                                                theme,
+                                                ButtonKind::Quiet,
+                                                interaction(status, false),
+                                            )
+                                        }),
+                                );
+                            }
+                            if let Some(proposal) = proposal_here {
+                                let target_id = parchmint_domain::encode_stable_id(
+                                    proposal.target.document.as_bytes(),
+                                );
+                                let current = workspace
+                                    .check_edit_is_current(&thread.id, &proposal.origin)
+                                    && workspace
+                                        .editor()
+                                        .pane(crate::EditorPane::Primary)
+                                        .active_document()
+                                        == Some(target_id.as_str());
+                                history = history
+                                    .push(components::muted_label("Proposed"))
+                                    .push(text(&proposal.replacement).size(12))
+                                    .push(
+                                        row![
+                                            button(text("Apply").size(12)).on_press_maybe(
+                                                current.then(|| ProjectSurfaceMessage::Project(
+                                                    ProjectMessage::ApplyCheckEdit {
+                                                        conversation_id: thread.id.clone()
+                                                    }
+                                                ))
+                                            ),
+                                            button(text("Discard").size(12)).on_press(
+                                                ProjectSurfaceMessage::Project(
+                                                    ProjectMessage::DiscardCheckEdit {
+                                                        conversation_id: thread.id.clone()
+                                                    }
+                                                )
+                                            ),
+                                        ]
+                                        .spacing(4),
+                                    );
+                                if let Some(warning) = &proposal.usage_warning {
+                                    history = history.push(components::muted_label(warning));
+                                }
+                                if let (Some(cost), Some(total)) = (
+                                    proposal.estimated_cost_micros,
+                                    proposal.estimated_period_total_micros,
+                                ) {
+                                    history = history.push(components::muted_label(format!(
+                                        "Est. ${:.4} · period ${:.2}",
+                                        cost as f64 / 1_000_000.0,
+                                        total as f64 / 1_000_000.0
+                                    )));
+                                }
+                            }
+                        }
+                        let selected =
+                            workspace.saved_check_decision(&thread.id, index, finding_index);
+                        if workspace
+                            .check_decision_candidate(
+                                &thread.id,
+                                index,
+                                finding_index,
+                                parchmint_domain::ContinuityDecision::Intentional,
+                            )
+                            .is_some()
+                        {
+                            let mut actions = row![].spacing(2);
+                            for (label, decision) in [
+                                (
+                                    "Intentional",
+                                    parchmint_domain::ContinuityDecision::Intentional,
+                                ),
+                                ("Dismiss", parchmint_domain::ContinuityDecision::Dismissed),
+                                ("Resolved", parchmint_domain::ContinuityDecision::Resolved),
+                            ] {
+                                let label = if selected == Some(decision) {
+                                    format!("✓ {label}")
+                                } else {
+                                    label.to_owned()
+                                };
+                                actions = actions.push(
+                                    button(text(label).size(12))
+                                        .padding([4, 6])
+                                        .on_press_maybe((selected != Some(decision)).then(|| {
+                                            ProjectSurfaceMessage::Project(
+                                                ProjectMessage::SetCheckDecision {
+                                                    conversation_id: thread.id.clone(),
+                                                    turn: index,
+                                                    finding: finding_index,
+                                                    decision,
+                                                },
+                                            )
+                                        }))
+                                        .style(move |_, status| {
+                                            components::button_style(
+                                                theme,
+                                                ButtonKind::Quiet,
+                                                interaction(status, false),
+                                            )
+                                        }),
+                                );
+                            }
+                            history = history.push(actions);
+                        } else if let Some(decision) = selected {
+                            let label = match decision {
+                                parchmint_domain::ContinuityDecision::Intentional => "Intentional",
+                                parchmint_domain::ContinuityDecision::Dismissed => "Dismissed",
+                                parchmint_domain::ContinuityDecision::Resolved => "Resolved",
+                            };
+                            history = history
+                                .push(components::muted_label(format!("{label} · Needs recheck")));
+                        }
+                    }
+                }
+            }
+            if turn.result.context_truncated {
+                history = history.push(components::muted_label("Context incomplete"));
+            }
+            if let Some(warning) = &turn.result.usage_warning
+                && !thread.edit_proposal.as_ref().is_some_and(|proposal| {
+                    proposal.origin.turn == index
+                        && proposal.usage_warning.as_ref() == Some(warning)
+                })
+            {
+                history = history.push(components::muted_label(warning));
+            }
+            if !turn.result.context_warnings.is_empty() {
+                history = history.push(components::muted_label("Unavailable sources"));
+            }
+            if !turn.result.context.is_empty() || !turn.result.context_warnings.is_empty() {
+                let expanded = thread.expanded_context.contains(&index);
+                history = history.push(
+                    button(
+                        text(if expanded {
+                            "Hide context".to_owned()
+                        } else if turn.result.context.is_empty() {
+                            "Source issues".to_owned()
+                        } else {
+                            format!("Context ({})", turn.result.context.len())
+                        })
+                        .size(12),
+                    )
+                    .on_press(ProjectSurfaceMessage::Project(
+                        ProjectMessage::ToggleAssistantContext { tab, turn: index },
+                    ))
+                    .style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, false),
+                        )
+                    }),
+                );
+                if expanded {
+                    for warning in &turn.result.context_warnings {
+                        history = history.push(components::muted_label(warning));
+                    }
+                    for source in &turn.result.context {
+                        let section = match source.section {
+                            parchmint_assistant_api::ProjectSection::Manuscript => "Manuscript",
+                            parchmint_assistant_api::ProjectSection::Lore => "Lore",
+                            parchmint_assistant_api::ProjectSection::Research => "Research",
+                            parchmint_assistant_api::ProjectSection::Notes => "Notes",
+                        };
+                        let changed = if workspace.assistant_source_is_current(source) {
+                            ""
+                        } else {
+                            " · changed since request"
+                        };
+                        let provenance =
+                            source
+                                .original
+                                .as_ref()
+                                .map_or_else(String::new, |original| {
+                                    format!(" · extracted original, segment {}", original.segment)
+                                });
+                        history = history
+                            .push(components::muted_label(format!(
+                                "[{}] {} · {}{}{}",
+                                source.source_id, section, source.title, provenance, changed
+                            )))
+                            .push(text(&source.text).size(12));
+                    }
+                }
+            }
+            if !turn.result.response.unverified_project_citations.is_empty() {
+                history = history.push(components::muted_label("Unverified citations"));
+            }
+            for citation in &turn.result.response.project_citations {
+                if let Some(source) = turn
+                    .result
+                    .context
+                    .iter()
+                    .find(|source| source.source_id == citation.source_id)
+                {
+                    let current = workspace.assistant_source_is_current(source);
+                    let label = if current {
+                        format!("[{}] {}", source.source_id, source.title)
+                    } else {
+                        format!("[{}] {} · changed", source.source_id, source.title)
+                    };
+                    let source = source.clone();
+                    history = history.push(
+                        button(text(label).size(12))
+                            .on_press_maybe(current.then_some(ProjectSurfaceMessage::Project(
+                                ProjectMessage::OpenAssistantPassage(Box::new(source)),
+                            )))
+                            .style(move |_, status| {
+                                components::button_style(
+                                    theme,
+                                    ButtonKind::Quiet,
+                                    interaction(status, false),
+                                )
+                            }),
+                    );
+                }
+            }
+            for citation in &turn.result.response.web_citations {
+                history = history.push(
+                    button(text(&citation.title).size(12))
+                        .on_press_maybe(citation.url.starts_with("https://").then(|| {
+                            ProjectSurfaceMessage::OpenAssistantSource(citation.url.clone())
+                        }))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+            if tab == AssistantDockTab::Research && !turn.result.response.web_citations.is_empty() {
+                history = history.push(
+                    button(text("Save to Research…").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::BeginResearchImport {
+                                conversation_id: thread.id.clone(),
+                                turn: index,
+                            },
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+        }
+        if matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Research)
+            && thread.pending.is_some()
+            && let Ok(preview) = thread.progress.lock()
+            && !preview.is_empty()
+        {
+            history = history.push(components::muted_label(preview.clone()));
+        }
+        if let Some(error) = &thread.error {
+            history = history.push(text(error).size(12).color(theme.palette().error));
+            if error == &parchmint_assistant_api::AssistantError::MissingCredential.to_string() {
+                history = history.push(
+                    button(text("Open Settings").size(13))
+                        .on_press(ProjectSurfaceMessage::OpenAssistantSettings)
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Secondary,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+        }
+        if let Some(proposal) = &thread.note_proposal {
+            history = history.push(components::muted_label("Proposed note"));
+            history = history.push(text(proposal).size(13));
+        }
+        for prompt in &thread.interrupted_prompts {
+            history = history.push(components::muted_label("Interrupted request"));
+            history = history.push(text(prompt).size(13));
+            if thread.draft.is_empty() && thread.pending.is_none() {
+                history = history.push(
+                    button(text("Use request").size(12))
+                        .on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetAssistantDraft {
+                                tab,
+                                conversation_id: thread.id.clone(),
+                                value: prompt.clone(),
+                            },
+                        ))
+                        .style(move |_, status| {
+                            components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false),
+                            )
+                        }),
+                );
+            }
+        }
+    }
+    if !configured {
+        return column![
+            conversation_controls,
+            text("No AI API key has been set up.").size(13),
+            button(text("Open Settings").size(13))
+                .on_press(ProjectSurfaceMessage::OpenAssistantSettings)
+                .style(move |_, status| components::button_style(
+                    theme,
+                    ButtonKind::Secondary,
+                    interaction(status, false)
+                )),
+            crate::scroll_gate::smooth(
+                scrollable(
+                    container(history)
+                        .width(Length::Fill)
+                        .padding(iced::Padding::new(0.0).right(12))
+                )
+                .anchor_bottom()
+                .height(Length::Fill)
+            ),
+        ]
+        .spacing(12)
+        .height(Length::Fill);
+    }
+    let mut content = column![
+        conversation_controls,
+        crate::scroll_gate::smooth(
+            scrollable(
+                container(history)
+                    .width(Length::Fill)
+                    .padding(iced::Padding::new(0.0).right(12))
+            )
+            .anchor_bottom()
+            .height(Length::Fill)
+        )
+    ]
+    .spacing(10)
+    .height(Length::Fill);
+    if tab == AssistantDockTab::Check {
+        let target = workspace
+            .inspector_node_id()
+            .and_then(|node| workspace.explorer().title(node))
+            .unwrap_or("Select a document or group");
+        content = content.push(components::muted_label(format!("Checking: {target}")));
+    } else if tab == AssistantDockTab::Research {
+        content = content.push(
+            button(text("Add a source link…").size(12))
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::BeginManualResearchImport,
+                ))
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                }),
+        );
+    }
+    if matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Check) {
+        let open = thread.is_some_and(|thread| thread.context_controls_open);
+        let customized = thread.is_some_and(|thread| {
+            !thread.pinned_context.is_empty()
+                || !thread.excluded_context.is_empty()
+                || thread.context_scope.is_some()
+                || thread.selection_only
+                || thread.explicit_notes.is_some()
+        });
+        content = content.push(
+            button(
+                text(if open {
+                    "Hide project context"
+                } else if thread.is_some_and(|thread| {
+                    matches!(
+                        thread.explicit_notes,
+                        Some(parchmint_ui_api::AssistantExplicitNotes::Document { .. })
+                    )
+                }) {
+                    "Project context · Current notes"
+                } else if thread.is_some_and(|thread| {
+                    matches!(
+                        thread.explicit_notes,
+                        Some(parchmint_ui_api::AssistantExplicitNotes::Project { .. })
+                    )
+                }) {
+                    "Project context · Project notes"
+                } else if customized {
+                    "Project context · Customized"
+                } else {
+                    "Project context · Automatic"
+                })
+                .size(12),
+            )
+            .on_press(ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleAssistantContextControls(tab),
+            ))
+            .style(move |_, status| {
+                components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+            }),
+        );
+        if open {
+            use crate::project_workspace::AssistantNotesChoice;
+            use parchmint_ui_api::AssistantExplicitNotes;
+
+            let scope_item = |id: &str| AssistantScopeChoice::Item {
+                id: id.to_owned(),
+                title: workspace
+                    .explorer()
+                    .title(id)
+                    .unwrap_or("Unavailable item")
+                    .to_owned(),
+            };
+            let mut choices = vec![
+                AssistantScopeChoice::Automatic,
+                AssistantScopeChoice::EditorSelection,
+            ];
+            if let Some(id) = thread.and_then(|thread| thread.context_scope.as_deref()) {
+                choices.push(scope_item(id));
+            }
+            if let Some(id) = workspace.inspector_node_id()
+                && !choices.iter().any(|choice| matches!(choice, AssistantScopeChoice::Item { id: existing, .. } if existing == id))
+            {
+                choices.push(scope_item(id));
+            }
+            let selected_scope = if thread.is_some_and(|thread| thread.selection_only) {
+                AssistantScopeChoice::EditorSelection
+            } else if let Some(id) = thread.and_then(|thread| thread.context_scope.as_deref()) {
+                scope_item(id)
+            } else {
+                AssistantScopeChoice::Automatic
+            };
+            let scope_conversation = conversation_id.clone();
+            let mut controls = column![
+                row![
+                    text("Scope").size(12),
+                    harness_target::target(
+                        HarnessTarget::AssistantScope,
+                        pick_list(choices, Some(selected_scope), move |choice| {
+                            let message = match choice {
+                                AssistantScopeChoice::Automatic => {
+                                    ProjectMessage::SetAssistantContextScope {
+                                        tab,
+                                        conversation_id: scope_conversation.clone(),
+                                        node: None,
+                                    }
+                                }
+                                AssistantScopeChoice::EditorSelection => {
+                                    ProjectMessage::SetAssistantSelectionOnly {
+                                        tab,
+                                        conversation_id: scope_conversation.clone(),
+                                        enabled: true,
+                                    }
+                                }
+                                AssistantScopeChoice::Item { id, .. } => {
+                                    ProjectMessage::SetAssistantContextScope {
+                                        tab,
+                                        conversation_id: scope_conversation.clone(),
+                                        node: Some(id),
+                                    }
+                                }
+                            };
+                            ProjectSurfaceMessage::Project(message)
+                        })
+                        .width(Length::Fill)
+                        .text_size(12)
+                        .padding([4, 6])
+                    ),
+                ]
+                .spacing(6)
+                .align_y(iced::alignment::Vertical::Center),
+            ]
+            .spacing(6);
+
+            if tab == AssistantDockTab::Ask {
+                let selected = thread.and_then(|thread| thread.explicit_notes);
+                let current_available = workspace
+                    .editor()
+                    .pane(crate::EditorPane::Primary)
+                    .active_document()
+                    .is_some_and(|id| workspace.node_for_document(id).is_some());
+                let available = thread.is_some_and(|thread| {
+                    thread.pending.is_none() && !thread.draft.trim().is_empty()
+                });
+                let note_scope_available = thread.is_some_and(|thread| !thread.selection_only);
+                let note_button = |label: &'static str, choice, is_selected, enabled| {
+                    let mut button = button(text(label).size(12)).style(move |_, status| {
+                        components::button_style(
+                            theme,
+                            ButtonKind::Quiet,
+                            interaction(status, is_selected),
+                        )
+                    });
+                    if enabled && available {
+                        button = button.on_press(ProjectSurfaceMessage::Project(
+                            ProjectMessage::SetAssistantNotes {
+                                conversation_id: conversation_id.clone(),
+                                choice,
+                            },
+                        ));
+                    }
+                    button
+                };
+                controls = controls.push(components::muted_label("Notes · this question"));
+                controls = controls.push(
+                    row![
+                        note_button(
+                            "By request",
+                            AssistantNotesChoice::ByRequest,
+                            selected.is_none(),
+                            true
+                        ),
+                        note_button(
+                            "Current",
+                            AssistantNotesChoice::CurrentDocument,
+                            matches!(selected, Some(AssistantExplicitNotes::Document { .. })),
+                            current_available && note_scope_available
+                        ),
+                        note_button(
+                            "Project",
+                            AssistantNotesChoice::Project,
+                            matches!(selected, Some(AssistantExplicitNotes::Project { .. })),
+                            note_scope_available
+                        ),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::alignment::Vertical::Center),
+                );
+                if let Some(AssistantExplicitNotes::Document { document, .. }) = selected {
+                    let document_id = parchmint_domain::encode_stable_id(document.as_bytes());
+                    let node = workspace.node_for_document(&document_id);
+                    if node.as_deref() != workspace.inspector_node_id() {
+                        let title = node
+                            .and_then(|node| workspace.explorer().title(&node).map(str::to_owned))
+                            .unwrap_or_else(|| "Unavailable document".to_owned());
+                        controls =
+                            controls.push(components::muted_label(format!("Notes: {title}")));
+                    }
+                }
+                if matches!(selected, Some(AssistantExplicitNotes::Project { .. }))
+                    && thread.is_some_and(|thread| {
+                        thread.context_scope.is_some() || !thread.excluded_context.is_empty()
+                    })
+                {
+                    controls =
+                        controls.push(components::muted_label("Notes follow context limits"));
+                }
+            }
+            if thread.is_some_and(|thread| {
+                !thread.excluded_context.is_empty()
+                    || thread.context_scope.is_some()
+                    || thread.selection_only
+            }) {
+                controls = controls.push(components::muted_label("History excluded"));
+            }
+
+            if let Some(node) = workspace.inspector_node_id() {
+                let title = workspace
+                    .explorer()
+                    .title(node)
+                    .unwrap_or("Unavailable item");
+                let pinned = thread.is_some_and(|thread| thread.pinned_context.contains(node));
+                let excluded = thread.is_some_and(|thread| thread.excluded_context.contains(node));
+                controls = controls.push(
+                    row![
+                        components::muted_label(format!("Selected: {title}"))
+                            .width(Length::Fill)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                        button(text(if pinned { "Unpin" } else { "Pin" }).size(12))
+                            .on_press(ProjectSurfaceMessage::Project(
+                                ProjectMessage::ToggleAssistantContextRule {
+                                    tab,
+                                    conversation_id: conversation_id.clone(),
+                                    node: node.to_owned(),
+                                    rule: crate::project_workspace::AssistantContextRule::Pinned,
+                                }
+                            ))
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false)
+                            )),
+                        button(text(if excluded { "Include again" } else { "Exclude" }).size(12))
+                            .on_press(ProjectSurfaceMessage::Project(
+                                ProjectMessage::ToggleAssistantContextRule {
+                                    tab,
+                                    conversation_id: conversation_id.clone(),
+                                    node: node.to_owned(),
+                                    rule: crate::project_workspace::AssistantContextRule::Excluded,
+                                }
+                            ))
+                            .style(move |_, status| components::button_style(
+                                theme,
+                                ButtonKind::Quiet,
+                                interaction(status, false)
+                            )),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::alignment::Vertical::Center),
+                );
+            }
+
+            if let Some(thread) = thread {
+                let mut rules = column![].spacing(2);
+                let mut rule_count = 0;
+                for (rule, nodes) in [
+                    (
+                        crate::project_workspace::AssistantContextRule::Pinned,
+                        &thread.pinned_context,
+                    ),
+                    (
+                        crate::project_workspace::AssistantContextRule::Excluded,
+                        &thread.excluded_context,
+                    ),
+                ] {
+                    for node in nodes {
+                        if workspace.inspector_node_id() == Some(node.as_str()) {
+                            continue;
+                        }
+                        let title = workspace
+                            .explorer()
+                            .title(node)
+                            .unwrap_or("Unavailable item");
+                        let verb = match rule {
+                            crate::project_workspace::AssistantContextRule::Pinned => "Unpin",
+                            crate::project_workspace::AssistantContextRule::Excluded => {
+                                "Include again"
+                            }
+                        };
+                        rules = rules.push(
+                            button(text(format!("{verb}: {title}")).size(12))
+                                .on_press(ProjectSurfaceMessage::Project(
+                                    ProjectMessage::ToggleAssistantContextRule {
+                                        tab,
+                                        conversation_id: conversation_id.clone(),
+                                        node: node.clone(),
+                                        rule,
+                                    },
+                                ))
+                                .style(move |_, status| {
+                                    components::button_style(
+                                        theme,
+                                        ButtonKind::Quiet,
+                                        interaction(status, false),
+                                    )
+                                }),
+                        );
+                        rule_count += 1;
+                    }
+                }
+                if rule_count > 0 {
+                    controls = controls.push(
+                        container(crate::scroll_gate::smooth(
+                            scrollable(rules).height(Length::Shrink),
+                        ))
+                        .max_height(96),
+                    );
+                }
+            }
+            content = content.push(controls);
+        }
+    }
+    let draft = thread.map_or("", |thread| thread.draft.as_str());
+    let busy = thread.is_some_and(|thread| thread.pending.is_some());
+    let can_submit = !busy && (tab == AssistantDockTab::Check || !draft.trim().is_empty());
+    if let Some(thread) = thread {
+        let input_conversation_id = conversation_id.clone();
+        let submit_conversation_id = conversation_id.clone();
+        content = content.push(
+            text_editor(&thread.draft_editor)
+                .id(HarnessTarget::AssistantDraft.id())
+                .placeholder(if tab == AssistantDockTab::Check {
+                    "Optional focus for this check"
+                } else {
+                    "Write a question"
+                })
+                .on_action(move |action| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::EditAssistantDraft {
+                        tab,
+                        conversation_id: input_conversation_id.clone(),
+                        action,
+                    })
+                })
+                .key_binding(move |press| {
+                    if let iced::keyboard::Key::Character(key) = &press.key
+                        && matches!(press.status, text_editor::Status::Focused { .. })
+                    {
+                        let undo = press.modifiers == iced::keyboard::Modifiers::COMMAND
+                            && key.eq_ignore_ascii_case("z");
+                        let redo = if cfg!(target_os = "macos") {
+                            press.modifiers
+                                == (iced::keyboard::Modifiers::COMMAND
+                                    | iced::keyboard::Modifiers::SHIFT)
+                                && key.eq_ignore_ascii_case("z")
+                        } else {
+                            press.modifiers == iced::keyboard::Modifiers::COMMAND
+                                && key.eq_ignore_ascii_case("y")
+                        };
+                        if undo || redo {
+                            return Some(text_editor::Binding::Custom(
+                                ProjectSurfaceMessage::Project(
+                                    ProjectMessage::UndoAssistantDraft {
+                                        tab,
+                                        conversation_id: submit_conversation_id.clone(),
+                                        redo,
+                                    },
+                                ),
+                            ));
+                        }
+                    }
+                    if press.key == iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)
+                        && press.modifiers == iced::keyboard::Modifiers::COMMAND
+                        && matches!(press.status, text_editor::Status::Focused { .. })
+                    {
+                        return can_submit.then(|| {
+                            text_editor::Binding::Custom(ProjectSurfaceMessage::Project(
+                                ProjectMessage::SubmitAssistant {
+                                    tab,
+                                    conversation_id: submit_conversation_id.clone(),
+                                },
+                            ))
+                        });
+                    }
+                    text_editor::Binding::from_key_press(press)
+                })
+                .height(Length::Shrink)
+                .min_height(48)
+                .max_height(112)
+                .padding(8)
+                .size(13)
+                .style(move |_, status| multiline_field_style(theme, status)),
+        );
+    }
+    let action = if busy {
+        ProjectMessage::CancelAssistant {
+            tab,
+            conversation_id: conversation_id.clone(),
+        }
+    } else {
+        ProjectMessage::SubmitAssistant {
+            tab,
+            conversation_id: conversation_id.clone(),
+        }
+    };
+    let button = button(
+        text(if busy {
+            "Stop"
+        } else if tab == AssistantDockTab::Research {
+            "Search web"
+        } else if tab == AssistantDockTab::Check {
+            "Check"
+        } else {
+            "Send"
+        })
+        .size(13),
+    )
+    .on_press_maybe(
+        (busy || tab == AssistantDockTab::Check || !draft.trim().is_empty())
+            .then_some(ProjectSurfaceMessage::Project(action)),
+    )
+    .style(move |_, status| {
+        components::button_style(
+            theme,
+            if busy {
+                ButtonKind::Secondary
+            } else {
+                ButtonKind::Primary
+            },
+            interaction(status, false),
+        )
+    });
+    let guarded_button: Element<'a, ProjectSurfaceMessage> = if busy {
+        button.into()
+    } else {
+        container(button)
+            .id(harness_target::assistant_send_guard_id())
+            .into()
+    };
+    content.push(stationary_tooltip::tooltip(
+        crate::harness_target::target(HarnessTarget::AssistantSubmit, guarded_button),
+        container(
+            text(if cfg!(target_os = "macos") {
+                "⌘ Enter"
+            } else {
+                "Ctrl+Enter"
+            })
+            .size(12),
+        )
+        .padding([4, 6]),
+        components::surface(theme, Surface::Elevated, Interaction::Rest),
+    ))
+}
+
+fn research_import_preview<'a>(
+    workspace: &'a ProjectWorkspace,
+    draft: &'a crate::project_workspace::ResearchImportDraft,
+    theme: ParchMintTheme,
+) -> iced::widget::Column<'a, ProjectSurfaceMessage> {
+    use crate::ResearchImportForm;
+    let choices = workspace.research_destinations();
+    let selected = choices
+        .iter()
+        .find(|choice| choice.id == draft.parent_id)
+        .cloned();
+    let locked = draft.pending || draft.uncertain;
+    let mut preview = column![
+        text("Save to Research").size(14),
+        text("Title").size(12),
+        text_input("Source title", &draft.title)
+            .on_input_maybe((!locked).then_some(|value| ProjectSurfaceMessage::Project(
+                ProjectMessage::SetResearchImportTitle(value)
+            )))
+            .padding(8)
+            .size(13),
+        text("Destination").size(12),
+    ]
+    .spacing(8);
+    if locked {
+        preview = preview.push(components::muted_label(selected.as_ref().map_or_else(
+            || "Destination unavailable".to_owned(),
+            |choice| choice.label.clone(),
+        )));
+    } else {
+        preview = preview.push(pick_list(
+            choices,
+            selected,
+            |choice: crate::project_workspace::ResearchDestination| {
+                ProjectSurfaceMessage::Project(ProjectMessage::SetResearchImportDestination(
+                    choice.id,
+                ))
+            },
+        ));
+    }
+    if draft.uncertain {
+        preview = preview.push(
+            text("The previous save may have completed. Check Research before trying again. Changes start a new import.")
+                .size(12)
+                .color(theme.palette().error),
+        );
+        preview = preview.push(
+            button(text("Continue editing").size(12))
+                .on_press(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ResumeResearchImport,
+                ))
+                .style(move |_, status| {
+                    components::button_style(theme, ButtonKind::Quiet, interaction(status, false))
+                }),
+        );
+    }
+    if let Some(error) = &draft.error {
+        preview = preview.push(text(error).size(12).color(theme.palette().error));
+    }
+    if let Some(url) = &draft.manual_url {
+        preview = preview.push(text("Source URL").size(12)).push(
+            text_input("https://…", url)
+                .on_input_maybe((!locked).then_some(|value| {
+                    ProjectSurfaceMessage::Project(ProjectMessage::SetResearchSourceUrl(value))
+                }))
+                .padding(8)
+                .size(13),
+        );
+    }
+    preview = preview.push(text("Save as").size(12));
+    let mut forms = row![].spacing(6);
+    for (form, label) in [
+        (ResearchImportForm::Summary, "Summary"),
+        (ResearchImportForm::SourceLink, "Source link"),
+        (ResearchImportForm::Original, "Original file"),
+    ] {
+        if draft.manual_url.is_none() || form != ResearchImportForm::Summary {
+            let selected = draft.form == form;
+            forms = forms.push(
+                button(text(label).size(12))
+                    .on_press_maybe((!locked).then_some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::SetResearchImportForm(form),
+                    )))
+                    .style(move |_, status| flat_selection_button_style(theme, status, selected)),
+            );
+        }
+    }
+    preview = preview.push(forms);
+    for (index, source) in draft.sources.iter().enumerate() {
+        if draft.form == ResearchImportForm::Original {
+            let selected = draft.original_source == index;
+            preview = preview.push(
+                button(text(if selected { "Selected" } else { "Select" }).size(12))
+                    .on_press_maybe((!locked).then_some(ProjectSurfaceMessage::Project(
+                        ProjectMessage::SelectResearchOriginal(index),
+                    )))
+                    .style(move |_, status| flat_selection_button_style(theme, status, selected)),
+            );
+        }
+        preview = preview.push(text(format!("{} · {}", source.title, source.url)).size(12));
+    }
+    if draft.form == ResearchImportForm::Summary {
+        preview = preview.push(text(&draft.answer).size(13));
+    }
+    let actions = row![
+        button(text("Save").size(13))
+            .on_press_maybe(
+                (!draft.pending
+                    && !draft.uncertain
+                    && !draft.title.trim().is_empty()
+                    && draft.manual_url.as_ref().is_none_or(|url| url
+                        .trim()
+                        .starts_with("https://")
+                        && parchmint_platform_api::ValidatedExternalIntent::browser_url(
+                            url.trim()
+                        )
+                        .is_ok()))
+                .then_some(ProjectSurfaceMessage::Project(
+                    ProjectMessage::ConfirmResearchImport
+                ))
+            )
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Primary,
+                interaction(status, false)
+            )),
+        button(text("Cancel").size(13))
+            .on_press_maybe((!draft.pending).then_some(ProjectSurfaceMessage::Project(
+                ProjectMessage::CancelResearchImport
+            )))
+            .style(move |_, status| components::button_style(
+                theme,
+                ButtonKind::Quiet,
+                interaction(status, false)
+            )),
+    ]
+    .spacing(8);
+    column![
+        crate::scroll_gate::smooth(scrollable(preview).height(Length::Fill)),
+        actions
+    ]
+    .spacing(10)
+    .height(Length::Fill)
+}
+
+fn assistant_answer_text<'a>(
+    response: &'a parchmint_assistant_api::AssistantResponse,
+    theme: ParchMintTheme,
+) -> Element<'a, ProjectSurfaceMessage> {
+    let characters = response.text.chars().collect::<Vec<_>>();
+    let mut citations = response
+        .web_citations
+        .iter()
+        .filter_map(|citation| {
+            let (start, end) = (citation.start_index?, citation.end_index?);
+            (start < end && end <= characters.len() && citation.url.starts_with("https://"))
+                .then_some((start, end, citation.url.clone()))
+        })
+        .collect::<Vec<_>>();
+    citations.sort_by_key(|citation| citation.0);
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+    for (start, end, url) in citations {
+        if start < cursor {
+            continue;
+        }
+        if start > cursor {
+            spans.push(span(characters[cursor..start].iter().collect::<String>()));
+        }
+        spans.push(
+            span(characters[start..end].iter().collect::<String>())
+                .color(theme.palette().accent)
+                .underline(true)
+                .link(url),
+        );
+        cursor = end;
+    }
+    if cursor < characters.len() {
+        spans.push(span(characters[cursor..].iter().collect::<String>()));
+    }
+    rich_text(spans)
+        .size(13)
+        .on_link_click(ProjectSurfaceMessage::OpenAssistantSource)
+        .into()
 }
 
 fn status_bar<'a>(
@@ -5860,11 +7419,13 @@ fn status_bar<'a>(
             theme,
             Icon::Comment,
             HarnessTarget::ToggleInspector,
-            inspector_visible,
-            if inspector_visible {
-                "Hide notes"
-            } else {
+            inspector_visible && workspace.assistant_tab() == AssistantDockTab::Notes,
+            if inspector_visible && workspace.assistant_tab() == AssistantDockTab::Notes {
+                "Hide assistant and notes"
+            } else if inspector_visible {
                 "Show notes"
+            } else {
+                "Show assistant and notes"
             },
             Some(ProjectSurfaceMessage::ToggleInspector),
         )
@@ -6424,6 +7985,347 @@ mod tests {
     use parchmint_ui_api::ProjectSnapshot;
 
     use super::*;
+
+    #[test]
+    fn unconfigured_assistant_stays_in_the_selected_tab_until_settings_is_requested() {
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        for tab in [
+            AssistantDockTab::Ask,
+            AssistantDockTab::Check,
+            AssistantDockTab::Research,
+        ] {
+            assert!(
+                workspace
+                    .update(ProjectMessage::SelectAssistantTab(tab))
+                    .is_empty()
+            );
+            let mut simulator = Simulator::with_size(
+                Settings::default(),
+                Size::new(320.0, 600.0),
+                inspector(
+                    &workspace,
+                    ParchMintTheme::new(ResolvedAppearance::Light),
+                    320,
+                    [false; 3],
+                    false,
+                ),
+            );
+            assert!(simulator.find("No AI API key has been set up.").is_ok());
+            simulator.click("Open Settings").unwrap();
+            assert_eq!(
+                simulator.into_messages().collect::<Vec<_>>(),
+                [ProjectSurfaceMessage::OpenAssistantSettings]
+            );
+            assert_eq!(workspace.assistant_tab(), tab);
+        }
+        workspace.update(ProjectMessage::SelectAssistantTab(AssistantDockTab::Notes));
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            inspector(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                320,
+                [false; 3],
+                false,
+            ),
+        );
+        assert!(simulator.find("No AI API key has been set up.").is_err());
+    }
+
+    #[test]
+    fn a_missing_saved_credential_offers_settings_in_the_panel() {
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        workspace
+            .assistant_settings_mut()
+            .saved_profile
+            .credential_reference = Some("os_missing".into());
+        workspace.update(ProjectMessage::SelectAssistantTab(AssistantDockTab::Ask));
+        workspace.assistant_thread_mut(AssistantDockTab::Ask).error =
+            Some(parchmint_assistant_api::AssistantError::MissingCredential.to_string());
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            inspector(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                320,
+                [false; 3],
+                false,
+            ),
+        );
+        simulator.click("Open Settings").unwrap();
+        assert_eq!(
+            simulator.into_messages().collect::<Vec<_>>(),
+            [ProjectSurfaceMessage::OpenAssistantSettings]
+        );
+    }
+
+    #[test]
+    fn assistant_preview_stays_with_its_pending_conversation_and_out_of_history() {
+        use crate::project_workspace::AssistantPending;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        let tab = AssistantDockTab::Ask;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        let first_id = thread.id.clone();
+        let old_mailbox = thread.progress.clone();
+        thread.pending = Some(AssistantPending {
+            id: 1,
+            prompt: "A question".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: None,
+        });
+        old_mailbox
+            .lock()
+            .unwrap()
+            .push_str("unfinished first answer");
+        let snapshot = workspace.assistant_conversation_snapshot();
+        assert!(snapshot.threads[0].turns.is_empty());
+        assert_eq!(snapshot.threads[0].interrupted_prompts, ["A question"]);
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(simulator.find("unfinished first answer").is_ok());
+        drop(simulator);
+
+        workspace.update(ProjectMessage::NewAssistantConversation(tab));
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(simulator.find("unfinished first answer").is_err());
+        drop(simulator);
+        workspace.update(ProjectMessage::SelectAssistantConversation { tab, id: first_id });
+        let thread = workspace.assistant_thread_mut(tab);
+        thread.progress = Default::default(); // A later request owns a new mailbox.
+        thread.progress.lock().unwrap().push_str("new answer");
+        old_mailbox.lock().unwrap().push_str(" late output");
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(simulator.find("new answer").is_ok());
+        assert!(
+            simulator
+                .find("unfinished first answer late output")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn research_preview_has_no_save_action_before_citations_are_validated() {
+        use crate::project_workspace::AssistantPending;
+        use std::sync::{Arc, atomic::AtomicBool};
+
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        let tab = AssistantDockTab::Research;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        thread.pending = Some(AssistantPending {
+            id: 1,
+            prompt: "Find a source".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: None,
+        });
+        thread
+            .progress
+            .lock()
+            .unwrap()
+            .push_str("Provisional research text");
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                true,
+            ),
+        );
+        assert!(simulator.find("Provisional research text").is_ok());
+        assert!(simulator.find("Save to Research…").is_err());
+    }
+
+    #[test]
+    fn assistant_can_show_the_project_passages_sent_with_an_answer() {
+        use parchmint_assistant_api::{AssistantResponse, ContextPassage, ProjectSection};
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        let tab = AssistantDockTab::Ask;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        workspace
+            .assistant_thread_mut(tab)
+            .turns
+            .push(crate::project_workspace::AssistantTurn {
+                question: "What is the rule?".into(),
+                result: parchmint_ui_api::AssistantWorkflowResult {
+                    check_report: None,
+                    check_report_invalid: false,
+                    response: AssistantResponse {
+                        text: "The light stays on.".into(),
+                        project_citations: Vec::new(),
+                        unverified_project_citations: Vec::new(),
+                        web_citations: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                    },
+                    context: vec![ContextPassage {
+                        source_id: "S1".into(),
+                        document_id: "document".into(),
+                        document_revision: 1,
+                        section: ProjectSection::Lore,
+                        title: "Lighthouse".into(),
+                        anchor: None,
+                        text: "Keep the light burning through the night.".into(),
+                        original: None,
+                    }],
+                    context_truncated: false,
+                    context_warnings: Vec::new(),
+                    estimated_cost_micros: None,
+                    estimated_period_total_micros: None,
+                    usage_warning: None,
+                    web_retrieved_at_unix_seconds: None,
+                    provider_binding: "fixture".into(),
+                    notes_derived: false,
+                    edit_proposal_target: None,
+                },
+            });
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(
+            simulator
+                .find("Keep the light burning through the night.")
+                .is_err()
+        );
+        simulator.click("Context (1)").unwrap();
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleAssistantContext { tab, turn: 0 }
+            )]
+        );
+        workspace.update(ProjectMessage::ToggleAssistantContext { tab, turn: 0 });
+        let mut expanded = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(
+            expanded
+                .find("[S1] Lore · Lighthouse · changed since request")
+                .is_ok()
+        );
+        assert!(
+            expanded
+                .find("Keep the light burning through the night.")
+                .is_ok()
+        );
+        expanded.click("Hide context").unwrap();
+    }
+
+    #[test]
+    fn check_findings_expand_only_in_their_own_conversation() {
+        use parchmint_assistant_api::{
+            AssistantResponse, CheckCategory, CheckFinding, CheckReport, ContextPassage,
+            ProjectSection,
+        };
+        let mut workspace = ProjectWorkspace::from_fixture(crate::ProjectFixture::Explorer);
+        let tab = AssistantDockTab::Check;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        let id = workspace.assistant_thread_mut(tab).id.clone();
+        let source = ContextPassage {
+            source_id: "S1".into(),
+            document_id: "document".into(),
+            document_revision: 1,
+            section: ProjectSection::Lore,
+            title: "Keeper".into(),
+            anchor: None,
+            text: "Mara has the key.".into(),
+            original: None,
+        };
+        workspace
+            .assistant_thread_mut(tab)
+            .turns
+            .push(crate::project_workspace::AssistantTurn {
+                question: "Check".into(),
+                result: parchmint_ui_api::AssistantWorkflowResult {
+                    response: AssistantResponse {
+                        text: "One possible conflict".into(),
+                        project_citations: Vec::new(),
+                        unverified_project_citations: Vec::new(),
+                        web_citations: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                    },
+                    check_report: Some(CheckReport {
+                        summary: "One possible conflict".into(),
+                        scope: None,
+                        findings: vec![CheckFinding {
+                            matched_decision_id: None,
+                            category: CheckCategory::ObjectsPossession,
+                            explanation: "The key changes hands.".into(),
+                            uncertainty: Some("A transfer may explain this.".into()),
+                            evidence: [source.clone(), source],
+                        }],
+                    }),
+                    check_report_invalid: false,
+                    context: Vec::new(),
+                    context_truncated: false,
+                    context_warnings: Vec::new(),
+                    estimated_cost_micros: None,
+                    estimated_period_total_micros: None,
+                    usage_warning: None,
+                    web_retrieved_at_unix_seconds: None,
+                    provider_binding: "fixture".into(),
+                    notes_derived: false,
+                    edit_proposal_target: None,
+                },
+            });
+        let theme = ParchMintTheme::new(ResolvedAppearance::Light);
+        let mut view = Simulator::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(view.find("Mara has the key.").is_err());
+        view.click("› Objects · The key changes hands.").unwrap();
+        let messages = view.into_messages().collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [ProjectSurfaceMessage::Project(
+                ProjectMessage::ToggleCheckFinding {
+                    conversation_id: id.clone(),
+                    turn: 0,
+                    finding: 0
+                }
+            )]
+        );
+        workspace.update(ProjectMessage::ToggleCheckFinding {
+            conversation_id: id,
+            turn: 0,
+            finding: 0,
+        });
+        let mut expanded = Simulator::<ProjectSurfaceMessage>::with_size(
+            Settings::default(),
+            Size::new(320.0, 600.0),
+            assistant_thread_surface(&workspace, theme, true),
+        );
+        assert!(expanded.find("Mara has the key.").is_ok());
+        assert!(expanded.find("A transfer may explain this.").is_ok());
+    }
     use crate::EditorPane;
 
     #[test]
@@ -6977,15 +8879,7 @@ mod tests {
                 900.0,
             ),
         );
-        for label in [
-            "Open",
-            "Open beside",
-            "History",
-            "Rename",
-            "Copy",
-            "Cut",
-            "Delete",
-        ] {
+        for label in ["Open", "History", "Rename", "Copy", "Cut", "Delete"] {
             let bounds = simulator.find(label).unwrap().visible_bounds().unwrap();
             assert!(
                 bounds.x >= 0.0
@@ -7111,6 +9005,18 @@ mod tests {
         assert_eq!(layout.explorer().width(), 280);
         assert_eq!(layout.inspector().width(), 0);
         assert_eq!(layout.center().width(), 1_160);
+    }
+
+    #[test]
+    fn editor_measurement_matches_rendered_sidebars_at_minimum_width() {
+        let mut layout = ShellLayout::for_window(1_280, 720);
+        assert_eq!(editor_measure_width(&layout), 952);
+        layout.set_inspector_visible(true);
+        assert_eq!(editor_measure_width(&layout), 632);
+        layout.set_explorer_visible(false);
+        assert_eq!(editor_measure_width(&layout), 912);
+        layout.set_inspector_visible(false);
+        assert_eq!(editor_measure_width(&layout), 1_232);
     }
 
     #[test]

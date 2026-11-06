@@ -11,15 +11,21 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+html5ever = "=0.40.1"
+parchmint-content-type = { path = "../parchmint-content-type" }
 parchmint-contracts = { path = "../parchmint-contracts" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }
+parchmint-editor-core = { path = "../parchmint-editor-core" }
 parchmint-history-api = { path = "../parchmint-history-api" }
 parchmint-project-format = { path = "../parchmint-project-format" }
 parchmint-project-repository = { path = "../parchmint-project-repository" }
 parchmint-recovery-api = { path = "../parchmint-recovery-api" }
 parchmint-save = { path = "../parchmint-save" }
+quick-xml = "=0.41.0"
+roxmltree = "=0.20.0"
 serde_json.workspace = true
 sha2.workspace = true
+scraper = { version = "=0.29.0", default-features = false }
 
 [dev-dependencies]

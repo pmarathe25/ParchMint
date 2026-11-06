@@ -299,12 +299,11 @@ fn novel_application_performance() {
         .unwrap();
     harness.press_key(WINDOW, HarnessKey::ArrowLeft).unwrap();
     let typing_one = samples(256, || harness.type_focused(WINDOW, "x").unwrap());
-    let title = harness.active_editor_tab_title().unwrap();
-    harness.right_click_text(WINDOW, title).unwrap();
     let start = Instant::now();
-    harness.click_text(WINDOW, "Open beside").unwrap();
-    let split_ms = ms(start);
-    assert!(harness.editor_panes_share_session().unwrap());
+    harness
+        .click_target(WINDOW, HarnessTarget::ToggleInspector)
+        .unwrap();
+    let dock_ms = ms(start);
     harness
         .click_target(WINDOW, HarnessTarget::EditorPrimary)
         .unwrap();
@@ -312,7 +311,7 @@ fn novel_application_performance() {
         .select_editor_text(WINDOW, EditorPane::Primary, "Benchmarkanchor.")
         .unwrap();
     harness.press_key(WINDOW, HarnessKey::ArrowLeft).unwrap();
-    let typing_split = samples(256, || harness.type_focused(WINDOW, "x").unwrap());
+    let typing_with_dock = samples(256, || harness.type_focused(WINDOW, "x").unwrap());
     let typed_memory = memory();
     let marker = "x".repeat(512);
     assert!(harness.active_editor_body().unwrap().contains(&marker));
@@ -373,7 +372,7 @@ fn novel_application_performance() {
         json!({
             "chapters": chapters, "words": chapters * words, "formatted": formatted,
             "open_ms": open_ms,
-            "typing_one": typing_one, "typing_split": typing_split, "split_ms": split_ms,
+            "typing_one": typing_one, "typing_with_dock": typing_with_dock, "dock_ms": dock_ms,
             "selection": selection, "scroll": scroll, "save_ms": save_times,
             "switching": switching, "reopen_ms": reopen_ms,
             "loaded_memory_kib": loaded_memory, "typed_memory_kib": typed_memory,

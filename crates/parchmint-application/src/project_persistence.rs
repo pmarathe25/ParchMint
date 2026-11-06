@@ -9,8 +9,8 @@ use std::{
 
 use parchmint_contracts::{AnnotationThread, generated::RecoveryRecordV1};
 use parchmint_domain::{
-    CheckpointId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectRevision, Resource,
-    apply_project_command,
+    CheckpointId, DocumentId, NodeId, NodeKind, Project, ProjectCommand, ProjectRevision,
+    ResearchOriginal, ResearchSourceId, Resource, apply_project_command,
 };
 use parchmint_editor_api::{
     CanonicalComment, CanonicalProjection, EditorPersistenceError, EditorRevision,
@@ -100,6 +100,35 @@ pub struct CreateDocumentWorkflow {
     pub parent: NodeId,
     pub index: usize,
     pub title: String,
+}
+
+/// A reviewed Research document with a validated initial body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateResearchDocumentWorkflow {
+    pub document: CreateDocumentWorkflow,
+    pub body: String,
+}
+
+/// A reviewed original and its ordinary Research document. Source bytes are
+/// never included in Debug output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CreateResearchOriginalWorkflow {
+    pub document: CreateDocumentWorkflow,
+    pub body: String,
+    pub source_id: ResearchSourceId,
+    pub original: ResearchOriginal,
+    pub bytes: Vec<u8>,
+}
+
+impl fmt::Debug for CreateResearchOriginalWorkflow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CreateResearchOriginalWorkflow")
+            .field("document", &self.document)
+            .field("source_id", &self.source_id)
+            .field("byte_length", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// One authoritative tree move prepared by the UI from a current snapshot.
@@ -244,6 +273,9 @@ struct CanonicalState {
     complete_resources: BTreeMap<CanonicalRelativePath, CanonicalResourceMetadata>,
     paths: CanonicalProjectPathMap,
     frontier: CanonicalPersistenceFrontier,
+    /// Bytes removed by a successful undo remain available to redo in this
+    /// session, just as the associated project undo entry does.
+    retired_originals: BTreeMap<ResearchSourceId, Vec<u8>>,
 }
 
 struct PendingSave {
@@ -269,7 +301,110 @@ pub struct ProjectPersistenceCoordinator {
     workflow: Mutex<()>,
 }
 
+fn continuity_evidence_changed() -> ProjectPersistenceError {
+    ProjectPersistenceError::Application(
+        "Continuity evidence changed or is ambiguous. Run the check again.".into(),
+    )
+}
+
 impl ProjectPersistenceCoordinator {
+    /// Publishes a reviewed decision through the project command lane and
+    /// returns only after its manifest and compatibility marker are durable.
+    /// Repeating the same record after a failed save safely retries that save.
+    pub fn set_continuity_decision(
+        &self,
+        record: parchmint_domain::ContinuityDecisionRecord,
+        expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        self.set_continuity_decision_with_hook(record, expected, || {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_continuity_decision_after_validation(
+        &self,
+        record: parchmint_domain::ContinuityDecisionRecord,
+        expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+        after_validation: impl FnOnce(),
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        self.set_continuity_decision_with_hook(record, expected, after_validation)
+    }
+
+    fn set_continuity_decision_with_hook(
+        &self,
+        record: parchmint_domain::ContinuityDecisionRecord,
+        expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+        after_validation: impl FnOnce(),
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        record.validate()?;
+        let (project, generation) = self.commands.continuity_validation_start()?;
+        let retry = project.continuity_decisions.get(&record.id) == Some(&record);
+        if !retry {
+            self.validate_continuity_evidence(&project, &record)?;
+        }
+        after_validation();
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        self.commands
+            .set_continuity_decision_if_current(
+                ProjectCommand::SetContinuityDecision {
+                    record: Box::new(record),
+                    expected: expected.map(Box::new),
+                },
+                generation,
+            )?
+            .ok_or_else(continuity_evidence_changed)?;
+        let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        self.await_save(handle)
+    }
+
+    fn validate_continuity_evidence(
+        &self,
+        project: &Project,
+        record: &parchmint_domain::ContinuityDecisionRecord,
+    ) -> Result<(), ProjectPersistenceError> {
+        use parchmint_editor_api::CanonicalDocumentLoad;
+        use parchmint_editor_core::EditorCoreSession;
+        let invalid = continuity_evidence_changed;
+        for evidence in &record.evidence {
+            let text = if let Some(original) = &evidence.original {
+                let source = project
+                    .research_originals
+                    .get(&original.source_id)
+                    .ok_or_else(invalid)?;
+                if source.document != evidence.document
+                    || source.sha256 != original.sha256
+                    || source.byte_length > crate::research_text::MAX_TEXT_BYTES as u64
+                {
+                    return Err(invalid());
+                }
+                let bytes = self.research_original_bytes(original.source_id)?;
+                crate::research_text::extract(&source.media_type, &bytes).map_err(|_| invalid())?
+            } else {
+                let snapshot = self
+                    .documents
+                    .snapshot(evidence.document)
+                    .map_err(|_| invalid())?;
+                if snapshot.revision.value() != evidence.revision {
+                    return Err(invalid());
+                }
+                let mut load = CanonicalDocumentLoad::new(evidence.document, &snapshot.body);
+                load.revision = snapshot.revision;
+                let session = EditorCoreSession::open(load).map_err(|_| invalid())?;
+                let text = session.canonical_projection().semantic().plain_text();
+                if !evidence.matches_source(&text) {
+                    return Err(invalid());
+                }
+                text
+            };
+            if !evidence.occurs_uniquely(&text) {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(
         commands: Arc<NativeProjectCommandDispatcher>,
         documents: Arc<NativeDocumentStateOwner>,
@@ -290,6 +425,7 @@ impl ProjectPersistenceCoordinator {
                 complete_resources,
                 paths,
                 frontier,
+                retired_originals: BTreeMap::new(),
             }),
             pending_saves: Mutex::new(BTreeMap::new()),
             pending_recovery: Mutex::new(BTreeMap::new()),
@@ -500,10 +636,11 @@ impl ProjectPersistenceCoordinator {
                     .ok_or(crate::ApplicationError::MissingDocument { document })
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let update = CanonicalDomainUpdate {
+        let mut update = CanonicalDomainUpdate {
             manifest: capture.dirty_resources.contains(Resource::Manifest),
             styles: capture.dirty_resources.contains(Resource::Styles),
             dictionary: capture.dirty_resources.contains(Resource::Dictionary),
+            research_originals: BTreeMap::new(),
             documents: dirty_documents
                 .iter()
                 .map(|(document, snapshot)| {
@@ -531,6 +668,18 @@ impl ProjectPersistenceCoordinator {
             .canonical
             .lock()
             .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        for id in project
+            .research_originals
+            .keys()
+            .filter(|id| !canonical.paths.research_originals.contains_key(id))
+        {
+            let bytes = canonical.retired_originals.get(id).ok_or_else(|| {
+                ProjectPersistenceError::Application(
+                    "Research original bytes are unavailable for this save".into(),
+                )
+            })?;
+            update.research_originals.insert(*id, bytes.clone());
+        }
         let persistence_frontier = CanonicalPersistenceFrontier {
             recovery_project_revision: self
                 .editor
@@ -569,6 +718,14 @@ impl ProjectPersistenceCoordinator {
                             .map(|snapshot| (document, snapshot))
                     })
                     .collect::<Result<BTreeMap<_, _>, _>>()?;
+                let mut fallback_resources = canonical.resources.clone();
+                for (id, bytes) in &update.research_originals {
+                    let path = CanonicalRelativePath::parse(format!(
+                        "research/originals/{}.bin",
+                        stable_id_text(id.as_bytes())
+                    ))?;
+                    fallback_resources.insert(path, bytes.clone());
+                }
                 let encoding = codec.encode_domain_project_with_annotations(
                     &project,
                     &documents
@@ -588,7 +745,7 @@ impl ProjectPersistenceCoordinator {
                             )
                         })
                         .collect(),
-                    &canonical.resources,
+                    &fallback_resources,
                     &canonical.paths,
                     &persistence_frontier,
                 )?;
@@ -724,21 +881,45 @@ impl ProjectPersistenceCoordinator {
         self.editor.retire_recovery_through(&recovery_base)?;
         self.editor.acknowledge_save(&acknowledgement)?;
         self.commands.acknowledge_save(&pending.capture)?;
-        let mut canonical = self
-            .canonical
-            .lock()
-            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
-        for path in &pending.patch.deletions {
-            canonical.resources.remove(path);
-        }
-        for (path, resource) in &pending.patch.resources {
-            canonical
-                .resources
-                .insert(path.clone(), resource.bytes.clone());
-        }
-        canonical.complete_resources = pending.patch.complete_resources;
-        canonical.paths = pending.patch.paths;
-        canonical.frontier = pending.patch.persistence_frontier;
+        self.commands.with_retained_research_originals(
+            |retained_originals| -> Result<(), ProjectPersistenceError> {
+                let mut canonical = self
+                    .canonical
+                    .lock()
+                    .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+                for path in &pending.patch.deletions {
+                    if let Some(bytes) = canonical.resources.remove(path)
+                        && let Some(id) = path
+                            .research_original_id()
+                            .and_then(parchmint_domain::decode_stable_id)
+                    {
+                        canonical
+                            .retired_originals
+                            .insert(ResearchSourceId::from_bytes(id), bytes);
+                    }
+                }
+                for (path, resource) in &pending.patch.resources {
+                    canonical
+                        .resources
+                        .insert(path.clone(), resource.bytes.clone());
+                    if let Some(id) = path
+                        .research_original_id()
+                        .and_then(parchmint_domain::decode_stable_id)
+                    {
+                        canonical
+                            .retired_originals
+                            .remove(&ResearchSourceId::from_bytes(id));
+                    }
+                }
+                canonical.complete_resources = pending.patch.complete_resources;
+                canonical.paths = pending.patch.paths;
+                canonical.frontier = pending.patch.persistence_frontier;
+                canonical
+                    .retired_originals
+                    .retain(|id, _| retained_originals.contains(id));
+                Ok(())
+            },
+        )??;
         *self
             .recovery_base
             .lock()
@@ -775,6 +956,193 @@ impl ProjectPersistenceCoordinator {
         self.register_current_document_base(request.document)?;
         Ok(CreatedDocumentRevision {
             document: request.document,
+            revision,
+        })
+    }
+
+    pub fn create_research_document(
+        &self,
+        request: CreateResearchDocumentWorkflow,
+    ) -> Result<CreatedDocumentRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let current = self.commands.project()?;
+        if current.nodes.section(request.document.parent)
+            != Some(parchmint_domain::ProjectSection::Research)
+        {
+            return Err(ProjectPersistenceError::Application(
+                "Research imports require a destination in Research".into(),
+            ));
+        }
+        if request.body.len() > 512 * 1024 {
+            return Err(ProjectPersistenceError::Application(
+                "Research import is too large".into(),
+            ));
+        }
+        let body = ProjectFormatCodec::default()
+            .decode_document(request.body.as_bytes())?
+            .as_html()
+            .to_owned();
+        let document = request.document;
+        if let Some(node) = current.nodes.get(document.node) {
+            if node.kind != NodeKind::Document(document.document)
+                || node.title != document.title
+                || current.nodes.parent(document.node) != Some(document.parent)
+                || self.documents.snapshot(document.document)?.body != body
+                || current
+                    .research_originals
+                    .values()
+                    .any(|source| source.document == document.document)
+            {
+                return Err(ProjectPersistenceError::Application(
+                    "Research import identity is already in use".into(),
+                ));
+            }
+            let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+            let revision = self.await_save(handle)?;
+            self.register_current_document_base(document.document)?;
+            return Ok(CreatedDocumentRevision {
+                document: document.document,
+                revision,
+            });
+        }
+        self.commands.create_document_with_body(
+            ProjectCommand::create_document(
+                document.node,
+                document.document,
+                document.parent,
+                document.index,
+                document.title,
+            ),
+            body,
+        )?;
+        let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        let revision = self.await_save(handle)?;
+        self.register_current_document_base(document.document)?;
+        Ok(CreatedDocumentRevision {
+            document: document.document,
+            revision,
+        })
+    }
+
+    /// Stages the exact original and creates its Research document as one
+    /// undoable project action, then saves the manifest, body, and bytes in the
+    /// normal multi-file transaction. A failed save retains the dirty action
+    /// and original in memory for the ordinary retry path.
+    pub fn create_research_original(
+        &self,
+        request: CreateResearchOriginalWorkflow,
+    ) -> Result<CreatedDocumentRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        if request.bytes.len() as u64 > parchmint_domain::MAX_RESEARCH_ORIGINAL_BYTES
+            || request.original.byte_length != request.bytes.len() as u64
+            || request.original.sha256 != *ContentHash::of_bytes(&request.bytes).as_bytes()
+            || request.original.document != request.document.document
+        {
+            return Err(ProjectPersistenceError::Application(
+                "Research original is too large or does not match its metadata".into(),
+            ));
+        }
+        if request.body.len() > 512 * 1024 {
+            return Err(ProjectPersistenceError::Application(
+                "Research import is too large".into(),
+            ));
+        }
+        let body = ProjectFormatCodec::default()
+            .decode_document(request.body.as_bytes())?
+            .as_html()
+            .to_owned();
+        {
+            let mut canonical = self
+                .canonical
+                .lock()
+                .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+            if canonical
+                .paths
+                .research_originals
+                .contains_key(&request.source_id)
+                || canonical.retired_originals.contains_key(&request.source_id)
+            {
+                return Err(ProjectPersistenceError::Application(
+                    "Research source identity is already in use".into(),
+                ));
+            }
+            canonical
+                .retired_originals
+                .insert(request.source_id, request.bytes);
+        }
+        let document = request.document;
+        let result = self.commands.create_document_with_body(
+            ProjectCommand::CreateResearchOriginal {
+                id: document.node,
+                document_id: document.document,
+                parent: document.parent,
+                index: document.index,
+                title: document.title,
+                source_id: request.source_id,
+                original: Box::new(request.original),
+            },
+            body,
+        );
+        if let Err(error) = result {
+            self.canonical
+                .lock()
+                .map_err(|_| ProjectPersistenceError::StateUnavailable)?
+                .retired_originals
+                .remove(&request.source_id);
+            return Err(error.into());
+        }
+        let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        let revision = self.await_save(handle)?;
+        self.register_current_document_base(document.document)?;
+        Ok(CreatedDocumentRevision {
+            document: document.document,
+            revision,
+        })
+    }
+
+    /// Completes a previously accepted import after a save failure without
+    /// downloading the source or creating a second document.
+    pub fn retry_research_original(
+        &self,
+        source_id: ResearchSourceId,
+        document: &CreateDocumentWorkflow,
+        body: &str,
+    ) -> Result<CreatedDocumentRevision, ProjectPersistenceError> {
+        let _workflow = self
+            .workflow
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let project = self.commands.project()?;
+        let node = project.nodes.get(document.node).ok_or_else(|| {
+            ProjectPersistenceError::Application("Research import is no longer available".into())
+        })?;
+        let original = project.research_originals.get(&source_id).ok_or_else(|| {
+            ProjectPersistenceError::Application("Research import is no longer available".into())
+        })?;
+        if node.kind != NodeKind::Document(document.document)
+            || original.document != document.document
+            || node.title != document.title
+            || project.nodes.parent(document.node) != Some(document.parent)
+            || self.documents.snapshot(document.document)?.body
+                != ProjectFormatCodec::default()
+                    .decode_document(body.as_bytes())?
+                    .as_html()
+        {
+            return Err(ProjectPersistenceError::Application(
+                "Research import identity is already in use".into(),
+            ));
+        }
+        let (handle, _) = self.request_save_inner(PersistenceSaveKind::Structural, None)?;
+        let revision = self.await_save(handle)?;
+        self.register_current_document_base(document.document)?;
+        Ok(CreatedDocumentRevision {
+            document: document.document,
             revision,
         })
     }
@@ -954,10 +1322,36 @@ impl ProjectPersistenceCoordinator {
 
         let current = self.commands.complete_authored_snapshot()?;
         let prepared = prepare_duplicates(&current.project, &current.documents, &request)?;
-        let revision = self.persist_prepared_state(
+        let originals = {
+            let canonical = self
+                .canonical
+                .lock()
+                .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+            let mut originals = BTreeMap::new();
+            for (old, new) in &prepared.source_ids {
+                let old_path = canonical.paths.research_originals.get(old).ok_or_else(|| {
+                    ProjectPersistenceError::Application(
+                        "Original source is unavailable for copying".into(),
+                    )
+                })?;
+                let bytes = canonical.resources.get(old_path).ok_or_else(|| {
+                    ProjectPersistenceError::Application(
+                        "Original source is unavailable for copying".into(),
+                    )
+                })?;
+                let new_path = CanonicalRelativePath::parse(format!(
+                    "research/originals/{}.bin",
+                    stable_id_text(new.as_bytes())
+                ))?;
+                originals.insert(new_path, bytes.clone());
+            }
+            originals
+        };
+        let revision = self.persist_prepared_state_with_originals(
             prepared.project.clone(),
             prepared.documents.clone(),
             None,
+            originals,
         )?;
 
         Ok(DuplicatedSubtreesRevision {
@@ -973,6 +1367,21 @@ impl ProjectPersistenceCoordinator {
         project: Project,
         documents: Vec<DocumentSnapshot>,
         restored_document: Option<DocumentId>,
+    ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
+        self.persist_prepared_state_with_originals(
+            project,
+            documents,
+            restored_document,
+            BTreeMap::new(),
+        )
+    }
+
+    fn persist_prepared_state_with_originals(
+        &self,
+        project: Project,
+        documents: Vec<DocumentSnapshot>,
+        restored_document: Option<DocumentId>,
+        additional_originals: BTreeMap<CanonicalRelativePath, Vec<u8>>,
     ) -> Result<PersistenceSavedRevision, ProjectPersistenceError> {
         let recovery_project_revision = self
             .editor
@@ -992,6 +1401,14 @@ impl ProjectPersistenceCoordinator {
             .canonical
             .lock()
             .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let mut existing_resources = canonical.resources.clone();
+        for (path, bytes) in additional_originals {
+            if existing_resources.insert(path, bytes).is_some() {
+                return Err(ProjectPersistenceError::Application(
+                    "Original source identity is already in use".into(),
+                ));
+            }
+        }
         let encoding = ProjectFormatCodec::default().encode_domain_project_with_annotations(
             &project,
             &documents
@@ -1012,7 +1429,7 @@ impl ProjectPersistenceCoordinator {
                     )
                 })
                 .collect(),
-            &canonical.resources,
+            &existing_resources,
             &canonical.paths,
             &frontier,
         )?;
@@ -1118,6 +1535,7 @@ impl ProjectPersistenceCoordinator {
                 .collect();
             canonical.frontier = encoding.persistence_frontier.clone();
             canonical.paths = encoding.paths;
+            canonical.retired_originals.clear();
         }
         *self
             .recovery_base
@@ -1243,6 +1661,10 @@ impl ProjectPersistenceCoordinator {
         let current_documents = current.documents;
         let (mut project, restored_paths, restored_frontier, restored_bodies, restored_comments) =
             decode_restored_project(current_project.id, &restored_resources)?;
+
+        // Once the project has required the newer format, never make an old
+        // writer eligible again merely by restoring an earlier checkpoint.
+        project.continuity_enabled |= current_project.continuity_enabled;
 
         // Domain and document revisions remain monotonic even when authored
         // content comes from an older checkpoint.
@@ -1409,6 +1831,7 @@ impl ProjectPersistenceCoordinator {
                 .collect();
             canonical.frontier = encoding.persistence_frontier.clone();
             canonical.paths = encoding.paths;
+            canonical.retired_originals.clear();
         }
         *self
             .recovery_base
@@ -1446,6 +1869,41 @@ impl ProjectPersistenceCoordinator {
                 })
             })
             .transpose()
+    }
+
+    /// Returns the last durable, integrity-checked bytes of a source original.
+    pub fn research_original_bytes(
+        &self,
+        source_id: ResearchSourceId,
+    ) -> Result<Vec<u8>, ProjectPersistenceError> {
+        let project = self.commands.project()?;
+        let original = project.research_originals.get(&source_id).ok_or_else(|| {
+            ProjectPersistenceError::Application("Research original is no longer available".into())
+        })?;
+        let canonical = self
+            .canonical
+            .lock()
+            .map_err(|_| ProjectPersistenceError::StateUnavailable)?;
+        let path = canonical
+            .paths
+            .research_originals
+            .get(&source_id)
+            .ok_or_else(|| {
+                ProjectPersistenceError::Application(
+                    "Research original has not been saved yet".into(),
+                )
+            })?;
+        let bytes = canonical.resources.get(path).ok_or_else(|| {
+            ProjectPersistenceError::Application("Research original is unavailable".into())
+        })?;
+        if bytes.len() as u64 != original.byte_length
+            || ContentHash::of_bytes(bytes).as_bytes() != &original.sha256
+        {
+            return Err(ProjectPersistenceError::Application(
+                "Research original failed its integrity check".into(),
+            ));
+        }
+        Ok(bytes.clone())
     }
 
     pub fn reconcile_recovery(&self) -> Result<PersistenceRecoveryState, ProjectPersistenceError> {
@@ -1624,6 +2082,41 @@ impl ProjectPersistenceCoordinator {
     }
 }
 
+#[cfg(test)]
+mod continuity_tests {
+    use parchmint_domain::{ContinuityEvidence, DocumentId};
+
+    #[test]
+    fn evidence_context_must_resolve_once_in_the_complete_source() {
+        let mut evidence = ContinuityEvidence {
+            document: DocumentId::from_bytes([1; 16]),
+            original: None,
+            quote: "aa".into(),
+            before: String::new(),
+            after: String::new(),
+            revision: 1,
+            anchor: None,
+        };
+        assert!(!evidence.occurs_uniquely("aaa"));
+        evidence.quote = "key".into();
+        evidence.before = "the ".into();
+        evidence.after = " is".into();
+        assert!(evidence.occurs_uniquely("Mara has the key is here"));
+        assert!(!evidence.occurs_uniquely("the key is here; the key is there"));
+        let repeated = "🔑 key and the key is here";
+        let first = repeated.find("key").unwrap();
+        let second = repeated.rfind("key").unwrap();
+        let first_scalar = repeated[..first].chars().count();
+        let second_scalar = repeated[..second].chars().count();
+        evidence.anchor = Some(format!("text:{first_scalar}:{}", first_scalar + 3));
+        assert!(evidence.anchor_matches(repeated));
+        assert!(evidence.occurs_uniquely(repeated));
+        assert!(!evidence.matches_source(repeated));
+        evidence.anchor = Some(format!("text:{second_scalar}:{}", second_scalar + 3));
+        assert!(evidence.matches_source(repeated));
+    }
+}
+
 fn recovery_affected_documents(replay: &RecoveryReplay) -> BTreeMap<DocumentId, EditorRevision> {
     let mut affected = BTreeMap::new();
     for batch in &replay.accepted {
@@ -1645,6 +2138,7 @@ pub(crate) struct PreparedDuplicate {
     pub(crate) created_roots: Vec<NodeId>,
     pub(crate) node_ids: BTreeMap<NodeId, NodeId>,
     pub(crate) document_ids: BTreeMap<DocumentId, DocumentId>,
+    pub(crate) source_ids: BTreeMap<ResearchSourceId, ResearchSourceId>,
 }
 
 pub(crate) fn prepare_duplicates(
@@ -1805,6 +2299,33 @@ pub(crate) fn prepare_duplicates(
         }
     }
 
+    let mut source_ids = BTreeMap::new();
+    for (old_id, original) in &project.research_originals {
+        let Some(new_document) = document_ids.get(&original.document).copied() else {
+            continue;
+        };
+        let mut ordinal = 0_u64;
+        let new_id = loop {
+            let mut digest = Sha256::new();
+            digest.update(b"parchmint research source copy v1\0");
+            digest.update(old_id.as_bytes());
+            digest.update(new_document.as_bytes());
+            digest.update(ordinal.to_be_bytes());
+            let hash = digest.finalize();
+            let mut bytes = [0; 16];
+            bytes.copy_from_slice(&hash[..16]);
+            let candidate = ResearchSourceId::from_bytes(bytes);
+            if !draft.research_originals.contains_key(&candidate) {
+                break candidate;
+            }
+            ordinal = ordinal.saturating_add(1);
+        };
+        let mut copied = original.clone();
+        copied.document = new_document;
+        draft.research_originals.insert(new_id, copied);
+        source_ids.insert(*old_id, new_id);
+    }
+    draft.validate()?;
     let mut all_documents = documents.to_vec();
     all_documents.extend(duplicated_documents);
     Ok(PreparedDuplicate {
@@ -1813,6 +2334,7 @@ pub(crate) fn prepare_duplicates(
         created_roots: sources.iter().map(|source| node_ids[source]).collect(),
         node_ids,
         document_ids,
+        source_ids,
     })
 }
 
@@ -1842,6 +2364,7 @@ fn normalized_subtree_roots(
     let mut visible_order = Vec::new();
     for root in [
         NodeId::manuscript_root(),
+        NodeId::lore_root(),
         NodeId::research_root(),
         NodeId::unfiled_root(),
     ] {
@@ -1975,11 +2498,12 @@ fn decode_restored_project(
     let control = resources
         .get(&CanonicalRelativePath::parse(".parchmint/format-version")?)
         .ok_or_else(|| ProjectPersistenceError::History("format control is missing".into()))?;
-    codec.detect(control)?;
+    let version = codec.detect(control)?;
     let manifest = resources
         .get(&CanonicalRelativePath::parse("project.toml")?)
         .ok_or_else(|| ProjectPersistenceError::History("project manifest is missing".into()))?;
     let manifest = codec.decode_manifest(manifest)?;
+    codec.validate_manifest_version(version, &manifest)?;
     let styles = resources
         .get(&CanonicalRelativePath::parse("styles.css")?)
         .map(|bytes| codec.decode_styles(bytes))
@@ -1992,6 +2516,7 @@ fn decode_restored_project(
             )
         })?;
     let frontier = codec.decode_persistence_frontier(&manifest)?;
+    codec.validate_research_originals(&project, &paths, resources)?;
     if let Some(dictionary) = resources.get(&CanonicalRelativePath::parse("dictionary.txt")?) {
         let dictionary = codec.decode_dictionary(dictionary)?;
         project.dictionary = Default::default();
@@ -2058,20 +2583,28 @@ fn canonical_resource_metadata(
     let mut metadata = resources
         .iter()
         .map(|(path, bytes)| {
-            let resource = match path.as_str() {
-                ".parchmint/format-version" => parchmint_project_format::ResourceId::FormatControl,
-                "project.toml" => parchmint_project_format::ResourceId::Manifest,
-                "styles.css" => parchmint_project_format::ResourceId::Styles,
-                "dictionary.txt" => parchmint_project_format::ResourceId::Dictionary,
-                path if path.starts_with("annotations/") && path.ends_with(".json") => {
-                    parchmint_project_format::ResourceId::Annotations {
-                        document_id: path
-                            .trim_start_matches("annotations/")
-                            .trim_end_matches(".json")
-                            .to_owned(),
-                    }
+            let resource = if let Some(source_id) = path.research_original_id() {
+                parchmint_project_format::ResourceId::ResearchOriginal {
+                    source_id: source_id.to_owned(),
                 }
-                _ => parchmint_project_format::ResourceId::Document,
+            } else {
+                match path.as_str() {
+                    ".parchmint/format-version" => {
+                        parchmint_project_format::ResourceId::FormatControl
+                    }
+                    "project.toml" => parchmint_project_format::ResourceId::Manifest,
+                    "styles.css" => parchmint_project_format::ResourceId::Styles,
+                    "dictionary.txt" => parchmint_project_format::ResourceId::Dictionary,
+                    path if path.starts_with("annotations/") && path.ends_with(".json") => {
+                        parchmint_project_format::ResourceId::Annotations {
+                            document_id: path
+                                .trim_start_matches("annotations/")
+                                .trim_end_matches(".json")
+                                .to_owned(),
+                        }
+                    }
+                    _ => parchmint_project_format::ResourceId::Document,
+                }
             };
             (
                 path.clone(),
@@ -2543,4 +3076,29 @@ fn persistence_status(status: EditorPersistenceStatus) -> PersistenceStatus {
 fn parse_stable_id(value: &str) -> Result<[u8; 16], ProjectPersistenceError> {
     parchmint_domain::decode_stable_id(value)
         .ok_or(ProjectPersistenceError::UnknownRecoveryAcceptance)
+}
+
+#[cfg(test)]
+mod research_original_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_keeps_an_original_distinct_from_document_content() {
+        let path =
+            CanonicalRelativePath::parse("research/originals/0123456789abcdef0123456789abcdef.bin")
+                .unwrap();
+        let bytes = b"\0\xff\r\n".to_vec();
+        let metadata = canonical_resource_metadata(
+            &BTreeMap::from([(path.clone(), bytes.clone())]),
+            &CanonicalProjectPathMap::default(),
+            &CanonicalPersistenceFrontier::default(),
+        );
+        assert_eq!(
+            metadata[&path].resource,
+            parchmint_project_format::ResourceId::ResearchOriginal {
+                source_id: "0123456789abcdef0123456789abcdef".into(),
+            }
+        );
+        assert_eq!(metadata[&path].hash, ContentHash::of_bytes(&bytes));
+    }
 }

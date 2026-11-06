@@ -6,6 +6,8 @@
 //! work starts and again immediately before its completion is delivered.
 
 mod async_task;
+mod credentials;
+pub use credentials::SessionCredentialStore;
 mod native_menu;
 mod registry;
 mod runtime;
@@ -26,11 +28,12 @@ use std::{
 use async_task::dispatch;
 use parchmint_platform_api::{
     ApplicationPathService, ApplicationPaths, AsyncResult, ClipboardContent, ClipboardFormats,
-    ClipboardService, DialogService, ExternalOpenService, MenuActivation, MenuActivationService,
-    MenuActivationStream, MenuBinding, MenuService, PathDialog, PlatformError, SemanticMenu,
-    SemanticMenuEntry, SystemAppearance, SystemAppearanceEvent, SystemAppearanceEventService,
-    SystemAppearanceEventStream, SystemAppearanceService, UntrustedClipboardContent,
-    UntrustedPathSelection, ValidatedExternalIntent, WindowCapability, WindowResult,
+    ClipboardService, CredentialStore, DialogService, ExternalOpenService, MenuActivation,
+    MenuActivationService, MenuActivationStream, MenuBinding, MenuService, PathDialog,
+    PlatformError, SemanticMenu, SemanticMenuEntry, SystemAppearance, SystemAppearanceEvent,
+    SystemAppearanceEventService, SystemAppearanceEventStream, SystemAppearanceService,
+    UntrustedClipboardContent, UntrustedPathSelection, ValidatedExternalIntent, WindowCapability,
+    WindowResult,
 };
 use registry::CapabilityRegistry;
 use runtime::{NativeBackend, SystemBackend};
@@ -60,6 +63,7 @@ impl Error for PlatformStartupError {}
 /// Concrete native service implementations used by the desktop executable.
 #[cfg_attr(feature = "interaction-harness", derive(Clone))]
 pub struct NativePlatform {
+    pub credentials: Arc<dyn CredentialStore>,
     pub dialogs: Arc<dyn DialogService>,
     pub menus: Arc<dyn MenuService>,
     pub menu_activations: Arc<dyn MenuActivationService>,
@@ -102,6 +106,7 @@ impl NativePlatform {
         #[cfg(target_os = "macos")]
         native_menu::register_activation_target(&services);
         let platform = Self {
+            credentials: Arc::new(credentials::NativeCredentialStore::default()),
             dialogs: services.clone(),
             menus: services.clone(),
             menu_activations: services.clone(),

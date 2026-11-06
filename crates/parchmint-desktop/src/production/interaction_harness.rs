@@ -122,6 +122,7 @@ enum HarnessAction {
     PreviewHierarchyTitles,
     DragHierarchyNodeToPane(HarnessWindow, HarnessNode, EditorPane),
     ContainsText(HarnessWindow, String),
+    AssistantDraft(HarnessWindow),
     TextIsVisible(HarnessWindow, String),
     Resize(HarnessWindow, f32, f32),
     Redraw(HarnessWindow),
@@ -131,9 +132,13 @@ enum HarnessAction {
     ElapseNotifications,
     HoldCompletions,
     ReleaseCompletions(bool),
+    DeferNextAssistantRequest,
+    CompleteDeferredTasks,
     AdvanceAutosaveClock(Duration, Duration),
     Close(HarnessWindow),
     ActiveEditorBody,
+    ActiveEditorSelectionText,
+    ActiveEditorSelectionIsRevealed,
     ActiveEditorTabTitle,
     ActiveEditorDocumentId(EditorPane),
     EditorPanesShareSession,
@@ -369,6 +374,12 @@ fn execute_action(
                 .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
+        HarnessAction::AssistantDraft(window) => {
+            return harness
+                .assistant_draft(window)
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
         HarnessAction::TextIsVisible(window, text) => {
             return harness
                 .text_is_visible(window, &text)
@@ -394,6 +405,11 @@ fn execute_action(
             harness.hold_completions();
             Ok(())
         }
+        HarnessAction::DeferNextAssistantRequest => {
+            harness.defer_next_assistant_request();
+            Ok(())
+        }
+        HarnessAction::CompleteDeferredTasks => harness.complete_deferred_tasks(),
         HarnessAction::ReleaseCompletions(newest_first) => {
             harness.release_completions(newest_first)
         }
@@ -405,6 +421,18 @@ fn execute_action(
             return harness
                 .active_editor_body()
                 .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::ActiveEditorSelectionText => {
+            return harness
+                .active_editor_selection_text()
+                .map(HarnessValue::Text)
+                .map_err(|error| error.to_string());
+        }
+        HarnessAction::ActiveEditorSelectionIsRevealed => {
+            return harness
+                .active_editor_selection_is_revealed()
+                .map(HarnessValue::Bool)
                 .map_err(|error| error.to_string());
         }
         HarnessAction::ActiveEditorTabTitle => {
@@ -1167,6 +1195,14 @@ impl DesktopInteractionHarness {
             .into_bool()
     }
 
+    pub fn assistant_draft(
+        &self,
+        window: HarnessWindow,
+    ) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::AssistantDraft(window))?
+            .into_text()
+    }
+
     /// Resizes the rendered window and dispatches its real resize event.
     pub fn resize(
         &self,
@@ -1219,6 +1255,18 @@ impl DesktopInteractionHarness {
             .into_unit()
     }
 
+    /// Suspends polling of the next assistant request while the harness accepts input.
+    pub fn defer_next_assistant_request(&self) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::DeferNextAssistantRequest)?
+            .into_unit()
+    }
+
+    /// Waits for deferred work after the test has released its external dependency.
+    pub fn complete_deferred_tasks(&self) -> Result<(), InteractionHarnessError> {
+        self.request(HarnessAction::CompleteDeferredTasks)?
+            .into_unit()
+    }
+
     /// Advances the production autosave clock without a wall-clock wait.
     pub fn advance_autosave_clock(
         &self,
@@ -1238,6 +1286,16 @@ impl DesktopInteractionHarness {
 
     pub fn active_editor_body(&self) -> Result<String, InteractionHarnessError> {
         self.request(HarnessAction::ActiveEditorBody)?.into_text()
+    }
+
+    pub fn active_editor_selection_text(&self) -> Result<String, InteractionHarnessError> {
+        self.request(HarnessAction::ActiveEditorSelectionText)?
+            .into_text()
+    }
+
+    pub fn active_editor_selection_is_revealed(&self) -> Result<bool, InteractionHarnessError> {
+        self.request(HarnessAction::ActiveEditorSelectionIsRevealed)?
+            .into_bool()
     }
 
     pub fn active_editor_tab_title(&self) -> Result<String, InteractionHarnessError> {

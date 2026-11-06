@@ -69,7 +69,7 @@ fn novelist_can_plan_draft_and_autosave_a_chaptered_manuscript() {
 }
 
 #[test]
-fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
+fn reopening_a_project_restores_cards_context_and_active_document() {
     let run = IsolatedRun::new("restore-writing-context").expect("isolated run");
     let project = run.root().join("restore-writing-context.parchmint");
     let harness = create_project(&run, &project, "Restore Writing Context");
@@ -92,15 +92,15 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
         .right_click_text(HarnessWindow::Project, "Harbor Notes")
         .expect("open research document menu");
     harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .expect("open research document in companion pane");
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("open research document in the editor");
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "Tide tables put the storm at midnight.",
         )
-        .expect("draft companion research note");
+        .expect("draft research note");
     harness
         .click_target(
             HarnessWindow::Project,
@@ -126,9 +126,9 @@ fn reopening_a_project_restores_cards_context_and_both_writing_panes() {
     assert!(
         reopened
             .active_editor_body()
-            .expect("read restored focused companion")
+            .expect("read restored active document")
             .contains("Tide tables put the storm at midnight."),
-        "the focused companion document should restore with the workspace"
+        "the active document should restore with the workspace"
     );
     reopened
         .close(HarnessWindow::Project)
@@ -907,11 +907,6 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
         .unwrap();
-    for _ in 0..2 {
-        harness
-            .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
-            .unwrap();
-    }
     harness
         .select_editor_text(
             HarnessWindow::Project,
@@ -930,7 +925,7 @@ fn editor_selection_popover_can_create_reply_resolve_and_delete_a_comment() {
         harness
             .snapshot(
                 HarnessWindow::Project,
-                std::path::Path::new(&root).join("editor-context-after-split"),
+                std::path::Path::new(&root).join("editor-context"),
             )
             .unwrap();
     }
@@ -1173,7 +1168,7 @@ fn revision_author_can_replace_a_phrase_after_the_draft_is_saved() {
 }
 
 #[test]
-fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
+fn research_heavy_novelist_can_plan_cards_and_draft_with_source_notes() {
     let run = IsolatedRun::new("research-heavy-novel").expect("isolated run");
     let project = run.root().join("research-heavy-novel.parchmint");
     let harness = create_project(&run, &project, "The Salt Archive");
@@ -1184,29 +1179,29 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
         .right_click_text(HarnessWindow::Project, "Lighthouse Log")
         .expect("open first research-note context menu");
     harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .expect("open the first research note in the companion pane");
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("open the first research note");
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "The light failed at midnight on 14 November.",
         )
-        .expect("write the lighthouse research note in the companion pane");
+        .expect("write the lighthouse research note");
     create_document(&harness, "Harbor Records", "Pilot Interview");
     harness
         .right_click_text(HarnessWindow::Project, "Pilot Interview")
         .expect("open second research-note context menu");
     harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .expect("open the second research note in the companion pane");
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("open the second research note");
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "Pilots refused the north channel after the glass tide.",
         )
-        .expect("write a second research note in the companion pane");
+        .expect("write a second research note");
 
     create_group(&harness, "Manuscript", "Act One");
     create_outline_document(
@@ -1247,7 +1242,7 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
             HarnessWindow::Project,
             HarnessTarget::Ribbon(RibbonDestination::Editor),
         )
-        .expect("return to drafting beside research");
+        .expect("return to drafting");
     harness
         .right_click_text(HarnessWindow::Project, "Opening Image")
         .expect("open the opening chapter");
@@ -1260,7 +1255,7 @@ fn research_heavy_novelist_can_plan_cards_and_draft_beside_source_notes() {
             HarnessTarget::EditorPrimary,
             "Rain carried the harbor bells across the water.",
         )
-        .expect("draft prose while research remains available in the companion pane");
+        .expect("draft prose while research remains available in the project");
     assert!(
         harness
             .active_editor_body()

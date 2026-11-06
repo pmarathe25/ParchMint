@@ -241,6 +241,40 @@ struct ProductionUiCallbacks {
 }
 
 impl NativeDesktopCallbacks for ProductionUiCallbacks {
+    fn assistant_preferences(&self) -> parchmint_preferences::AssistantPreferences {
+        let mut profile = block_on(self.preferences.load())
+            .map_or_else(|_| Default::default(), |snapshot| snapshot.values.assistant);
+        if let Some(reference) = profile.credential_reference.as_deref()
+            && reference.starts_with("session_")
+            && !self
+                .platform
+                .session_credentials
+                .as_ref()
+                .is_some_and(|store| store.read(reference).is_ok_and(|value| value.is_some()))
+        {
+            profile.credential_reference = None;
+            profile.credential_binding = None;
+        }
+        profile
+    }
+
+    fn configure_assistant(
+        &self,
+        profile: parchmint_preferences::AssistantPreferences,
+        key: parchmint_ui_iced::AssistantSecretDraft,
+        session_only: bool,
+        remove_key: bool,
+    ) -> Result<parchmint_preferences::AssistantPreferences, String> {
+        super::assistant_config::configure(
+            self.preferences.as_ref(),
+            &self.platform,
+            profile,
+            key.expose(),
+            session_only,
+            remove_key,
+        )
+    }
+
     fn preference_changes(&self) -> Option<parchmint_editor_api::EventStream<PreferenceChange>> {
         Some(self.preferences.changes())
     }

@@ -41,7 +41,7 @@ fn click(harness: &DesktopInteractionHarness, target: HarnessTarget) {
 }
 
 #[test]
-fn reduced_motion_shows_the_final_panes_on_the_first_frame() {
+fn reduced_motion_shows_the_final_dock_on_the_first_frame() {
     let run = IsolatedRun::new("reduced-motion-frames").unwrap();
     let harness = create_project(&run, &run.root().join("novel.parchmint"), "Reduced motion");
     harness
@@ -55,14 +55,11 @@ fn reduced_motion_shows_the_final_panes_on_the_first_frame() {
     harness.click_text(WINDOW, "Reduce motion").unwrap();
     click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
     harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
-    click(&harness, HarnessTarget::ToggleCompanion);
-    assert_ne!(
-        harness
-            .active_editor_document_id(EditorPane::Primary)
-            .unwrap(),
-        harness
-            .active_editor_document_id(EditorPane::Companion)
-            .unwrap(),
+    click(&harness, HarnessTarget::ToggleInspector);
+    assert!(
+        !harness
+            .target_is_visible(WINDOW, HarnessTarget::EditorCompanion)
+            .unwrap()
     );
     let output = capture_root("reduced-motion").unwrap_or_else(|| run.root().to_path_buf());
     harness
@@ -85,7 +82,7 @@ fn reduced_motion_shows_the_final_panes_on_the_first_frame() {
 }
 
 #[test]
-fn typing_and_undo_survive_interrupted_pane_motion() {
+fn typing_and_undo_survive_interrupted_dock_motion() {
     for appearance in ["Light", "Dark"] {
         let run = IsolatedRun::new("typing-motion").unwrap();
         let harness = create_project(&run, &run.root().join("novel.parchmint"), "Motion input");
@@ -96,17 +93,14 @@ fn typing_and_undo_survive_interrupted_pane_motion() {
             .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "Before motion.")
             .unwrap();
         harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
-        click(&harness, HarnessTarget::ToggleCompanion);
+        click(&harness, HarnessTarget::ToggleInspector);
         harness
             .advance_motion(WINDOW, Duration::from_millis(48))
             .unwrap();
-        assert_ne!(
-            harness
-                .active_editor_document_id(EditorPane::Primary)
-                .unwrap(),
-            harness
-                .active_editor_document_id(EditorPane::Companion)
-                .unwrap(),
+        assert!(
+            !harness
+                .target_is_visible(WINDOW, HarnessTarget::EditorCompanion)
+                .unwrap()
         );
         harness
             .type_into_target(WINDOW, HarnessTarget::EditorPrimary, " During motion.")
@@ -126,21 +120,18 @@ fn typing_and_undo_survive_interrupted_pane_motion() {
             harness.press_command_key(WINDOW, 'y').unwrap();
         }
         assert_eq!(harness.active_editor_body().unwrap(), edited);
-        click(&harness, HarnessTarget::ToggleCompanion);
+        click(&harness, HarnessTarget::ToggleInspector);
         harness
             .advance_motion(WINDOW, Duration::from_millis(16))
             .unwrap();
-        click(&harness, HarnessTarget::ToggleCompanion);
+        click(&harness, HarnessTarget::ToggleInspector);
         frames(&harness, &format!("typing-interrupted-{appearance}"));
         click(&harness, HarnessTarget::EditorPrimary);
         assert_eq!(harness.active_editor_body().unwrap(), edited);
-        assert_ne!(
-            harness
-                .active_editor_document_id(EditorPane::Primary)
-                .unwrap(),
-            harness
-                .active_editor_document_id(EditorPane::Companion)
-                .unwrap(),
+        assert!(
+            !harness
+                .target_is_visible(WINDOW, HarnessTarget::EditorCompanion)
+                .unwrap()
         );
         harness.elapse_autosave_idle().unwrap();
         harness.close(WINDOW).unwrap();
@@ -160,22 +151,20 @@ fn workspace_transitions_keep_writing_and_controls_available() {
         "Mara arrived at the harbor before dawn. The water held the last stars, and the houses along the quay were still asleep.\nShe carried a letter that no one was meant to read.").unwrap();
     harness.advance_motion(WINDOW, Duration::ZERO).unwrap();
     frames(&harness, "editor");
-    click(&harness, HarnessTarget::ToggleCompanion);
-    frames(&harness, "split-open");
-    for pane in [EditorPane::Primary, EditorPane::Companion] {
-        click(&harness, HarnessTarget::PaneFocus(pane));
-        frames(&harness, &format!("focus-{pane:?}"));
-        click(&harness, HarnessTarget::PaneFocus(pane));
-        frames(&harness, &format!("restore-{pane:?}"));
-    }
-    click(&harness, HarnessTarget::ToggleCompanion);
+    click(&harness, HarnessTarget::ToggleInspector);
+    frames(&harness, "dock-open");
+    click(&harness, HarnessTarget::PaneFocus(EditorPane::Primary));
+    frames(&harness, "focus-Primary");
+    click(&harness, HarnessTarget::PaneFocus(EditorPane::Primary));
+    frames(&harness, "restore-Primary");
+    click(&harness, HarnessTarget::ToggleInspector);
     harness
         .advance_motion(WINDOW, Duration::from_millis(48))
         .unwrap();
-    click(&harness, HarnessTarget::ToggleCompanion);
-    frames(&harness, "split-interrupted");
-    click(&harness, HarnessTarget::ToggleCompanion);
-    frames(&harness, "split-close");
+    click(&harness, HarnessTarget::ToggleInspector);
+    frames(&harness, "dock-interrupted");
+    click(&harness, HarnessTarget::ToggleInspector);
+    frames(&harness, "dock-close");
     for target in [
         HarnessTarget::ToggleExplorer,
         HarnessTarget::ToggleInspector,
@@ -266,8 +255,8 @@ fn workspace_transitions_keep_writing_and_controls_available() {
     harness.click_text(WINDOW, "Dark").unwrap();
     click(&harness, HarnessTarget::Ribbon(RibbonDestination::Editor));
     frames(&harness, "dark-editor");
-    click(&harness, HarnessTarget::ToggleCompanion);
-    frames(&harness, "dark-split");
+    click(&harness, HarnessTarget::ToggleInspector);
+    frames(&harness, "dark-dock");
     click(&harness, HarnessTarget::EditorPrimary);
     assert!(
         harness
@@ -286,7 +275,7 @@ fn workspace_transitions_keep_writing_and_controls_available() {
         .enumerate()
     {
         harness
-            .move_pointer_to_target(WINDOW, HarnessTarget::EditorCompanion, point)
+            .move_pointer_to_target(WINDOW, HarnessTarget::EditorPrimary, point)
             .unwrap();
         frames(&harness, &format!("tab-drag-{index}"));
     }
@@ -294,11 +283,6 @@ fn workspace_transitions_keep_writing_and_controls_available() {
     frames(&harness, "tab-drop");
     assert!(
         harness
-            .editor_tab_is_visible(WINDOW, EditorPane::Companion, document.clone())
-            .unwrap()
-    );
-    assert!(
-        !harness
             .editor_tab_is_visible(WINDOW, EditorPane::Primary, document)
             .unwrap()
     );
@@ -307,7 +291,7 @@ fn workspace_transitions_keep_writing_and_controls_available() {
 }
 
 #[test]
-fn widescreen_focus_keeps_both_panes_and_writing_available() {
+fn widescreen_focus_keeps_the_editor_and_writing_available() {
     let run = IsolatedRun::new("widescreen-focus-motion").unwrap();
     let harness = create_project(
         &run,
@@ -322,16 +306,14 @@ fn widescreen_focus_keeps_both_panes_and_writing_available() {
             "A wide editor passage.",
         )
         .unwrap();
-    click(&harness, HarnessTarget::ToggleCompanion);
+    click(&harness, HarnessTarget::ToggleInspector);
     harness
         .advance_motion(WINDOW, Duration::from_millis(400))
         .unwrap();
-    for pane in [EditorPane::Primary, EditorPane::Companion] {
-        click(&harness, HarnessTarget::PaneFocus(pane));
-        frames(&harness, &format!("widescreen-focus-{pane:?}-enter"));
-        click(&harness, HarnessTarget::PaneFocus(pane));
-        frames(&harness, &format!("widescreen-focus-{pane:?}-exit"));
-    }
+    click(&harness, HarnessTarget::PaneFocus(EditorPane::Primary));
+    frames(&harness, "widescreen-focus-Primary-enter");
+    click(&harness, HarnessTarget::PaneFocus(EditorPane::Primary));
+    frames(&harness, "widescreen-focus-Primary-exit");
     click(&harness, HarnessTarget::EditorPrimary);
     assert!(
         harness

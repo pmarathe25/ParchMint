@@ -23,6 +23,10 @@ verifies objects, and records the save intent's checkpoint ID. Automatic line-en
 conversion, executable-mode tracking, and symlink tracking are disabled. Absolute,
 escaping, and unexpected paths are rejected.
 
+The reserved `research/originals/<32-lowercase-hex-id>.bin` resource path is
+opaque: History hashes, checkpoints, and restores those bytes without line-ending
+conversion. The Research workflow uses these files for saved original sources.
+
 Ordinary saves reuse the latest checkpoint when authored resources are unchanged.
 Manifest revision counters and recovery bookkeeping do not create new versions;
 current files still retain that bookkeeping. Listing also omits older consecutive

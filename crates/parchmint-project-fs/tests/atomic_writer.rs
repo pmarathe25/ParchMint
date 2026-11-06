@@ -147,6 +147,68 @@ fn failure_after_a_partial_replacement_reopens_to_a_complete_generation() {
 }
 
 #[test]
+fn interrupted_continuity_upgrade_never_exposes_mismatched_marker_and_manifest() {
+    use parchmint_project_format::{CanonicalCodec, ProjectFormatCodec};
+    for fault in [
+        ReplaceFault::BeforeFirstReplace,
+        ReplaceFault::AfterFirstReplace,
+    ] {
+        let parent = TestDir::new("continuity-upgrade");
+        let project_path = parent.join("novel");
+        let files = NativeProjectFileSystem::new();
+        let (root, lease) = files
+            .create_root(UntrustedProjectPath::new(project_path.clone()))
+            .unwrap();
+        let old_manifest = b"[project]\ntitle = \"Old\"\n";
+        let new_manifest = b"[project]\ntitle = \"New\"\n[parchmint-structure]\nversion = 1\nnodes = []\n[parchmint-continuity]\nversion = 1\nrecords = []\n";
+        fs::write(project_path.join(".parchmint/format-version"), b"1\n").unwrap();
+        fs::write(project_path.join("project.toml"), old_manifest).unwrap();
+        let writer = FsAtomicWriter::new(FaultingOps::new(NativeAtomicFileOps::new(root), fault));
+        let staged = writer
+            .stage(AtomicWritePlan::new(vec![
+                StagedResource {
+                    path: ".parchmint/format-version".into(),
+                    bytes: b"2\n".to_vec(),
+                },
+                StagedResource {
+                    path: "project.toml".into(),
+                    bytes: new_manifest.to_vec(),
+                },
+            ]))
+            .unwrap();
+        assert!(matches!(
+            writer.commit(staged),
+            Err(WriteError::Interrupted)
+        ));
+        drop(writer);
+        drop(lease);
+        let (root, lease) = files
+            .acquire(UntrustedProjectPath::new(project_path.clone()))
+            .unwrap();
+        let records = files.transaction_records(&root).unwrap();
+        let recovery = FsAtomicWriter::new(NativeAtomicFileOps::new(root));
+        assert!(
+            recovery
+                .reconcile(records.into_iter().next().unwrap())
+                .unwrap()
+                .is_reconciled()
+        );
+        let control = fs::read(project_path.join(".parchmint/format-version")).unwrap();
+        let manifest = fs::read(project_path.join("project.toml")).unwrap();
+        let codec = ProjectFormatCodec::default();
+        let version = codec.detect(&control).unwrap();
+        codec
+            .validate_manifest_version(version, &codec.decode_manifest(&manifest).unwrap())
+            .unwrap();
+        assert!(
+            (control == b"1\n" && manifest == old_manifest)
+                || (control == b"2\n" && manifest == new_manifest)
+        );
+        drop(lease);
+    }
+}
+
+#[test]
 fn successful_commit_replaces_every_target_and_clears_recovery_state() {
     let parent = TestDir::new("commit");
     let project_path = parent.join("novel");

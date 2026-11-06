@@ -23,7 +23,7 @@ available and keeps `tiny-skia` as a fallback. Headless drivers select
 | [shortcut_router.rs](src/shortcut_router.rs) | Resolve every shipped or reassigned shortcut from the shared command catalog; adapt text editing commands to the focused widget |
 | [native.rs](src/native.rs) | Route input and completions to the owning window; apply editor commands against the originating view and selection |
 | [project_workspace.rs](src/project_workspace.rs) | Explorer, Overview, notes, History, search, settings, export, and recovery presentation; shared tree selection and move validation |
-| [editor_workspace.rs](src/editor_workspace.rs) | Tabs, panes, local search, and note drafts |
+| [editor_workspace.rs](src/editor_workspace.rs) | Editor tabs, local search, and note drafts |
 | [project_runtime.rs](src/project_runtime.rs) | Resolve IDs from current snapshots and call application ports |
 | [iced_project_surface.rs](src/iced_project_surface.rs), [iced_editor_surface.rs](src/iced_editor_surface.rs) | Render workspace state |
 | [cards_layout.rs](src/cards_layout.rs), [card_frames.rs](src/card_frames.rs) | Card geometry, text measurement, and enclosing group outlines |
@@ -64,8 +64,7 @@ property values keep the dialog open. Repeated edits to a definition coalesce
 before Save. Dictionary controls retain input until returned words confirm
 the change; project words use commands and global words use preference ports.
 
-Shared document sessions serve both panes with independent view state. Tab
-switches advance mount generations. Delayed results must match their target;
+Tab switches advance mount generations. Delayed results must match their target;
 loaded bodies merge without replacing newer outline state. Project revisions
 validate structure, while document operations validate document revisions.
 Recovery recording can advance document state independently of outline changes.
@@ -105,7 +104,8 @@ dragging, a floating card follows the cursor and a temporary tree previews its
 placement.
 Explorer keeps its rows stationary and marks the destination. Window-wide release
 commits; cancellation discards the preview.
-Tabs can move between panes, and either pane accepts Explorer document drops.
+Explorer document drops open in the editor tab strip. The right sidebar shares
+the existing Notes surface with the Ask, Check, and Research assistant modes.
 
 Spelling requests contain at most 4,096 scalars around a view's caret, including
 large paragraphs. Cancellation is silent; service errors preserve their cause.

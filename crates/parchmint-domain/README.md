@@ -21,6 +21,14 @@ place. Typed IDs prevent substituting one kind of resource for another.
 `DeletionTombstone` retains a deleted node's type, former parent and order, and
 restoration data.
 
+`ResearchOriginal` describes immutable source bytes separately from editable
+document text, with a stable source ID, provenance, size, and hash. Its associated
+document must remain live or represented by a deletion tombstone.
+
+Continuity decision records validate bounded evidence and compare issues
+conservatively without relying on request-local citation IDs or revisions. The
+project-resource and user-facing decision workflow are still in development.
+
 Commands check the expected revision, validate the current tree, mutate a draft,
 and validate that draft before publishing it. Failure leaves the input unchanged.
 The inverse is a `RestoreState` snapshot of the previous project, retained by

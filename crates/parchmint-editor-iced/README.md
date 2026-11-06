@@ -83,3 +83,5 @@ in [future work](../../plans/unimplemented/future-work.md).
 Mounted hosts expose the visible selection anchor and caret paragraph kind for
 selection actions and toolbar state. These come from the retained layout for that
 pane, so the UI does not build a separate selection or paragraph model.
+The host can also reveal a document position using the layout's height index;
+this changes the view's scroll position without changing the selection.

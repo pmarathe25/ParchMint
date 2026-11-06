@@ -280,6 +280,13 @@ pub fn shortcut_commands() -> Vec<ShortcutCommand> {
 }
 
 pub fn effective_shortcut(command: &ShortcutCommand, bindings: &Keybindings) -> Option<Shortcut> {
+    // Keep retired IDs valid for old preference files, but release their keys.
+    if matches!(
+        command.id,
+        "view.companion" | "tab.move-pane" | "outline.open-beside"
+    ) {
+        return None;
+    }
     bindings
         .get(command.id)
         .cloned()
@@ -317,6 +324,21 @@ pub fn validate_keybindings(bindings: &Keybindings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_companion_shortcuts_are_accepted_but_never_active() {
+        let ids = ["view.companion", "tab.move-pane", "outline.open-beside"];
+        let bindings = ids
+            .into_iter()
+            .map(|id| (id.to_owned(), Some(Shortcut::new("K", 1))))
+            .collect();
+        assert!(validate_keybindings(&bindings).is_ok());
+        for command in shortcut_commands()
+            .iter()
+            .filter(|command| ids.contains(&command.id))
+        {
+            assert!(effective_shortcut(command, &bindings).is_none());
+        }
+    }
     #[test]
     fn defaults_are_unique_and_overrides_detect_conflicts() {
         assert_eq!(validate_keybindings(&Keybindings::new()), Ok(()));

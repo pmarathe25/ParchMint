@@ -794,6 +794,7 @@ enum WireResourceId {
     Document,
     DocumentById(String),
     Annotations(String),
+    ResearchOriginal(String),
 }
 
 fn wire_resource(resource: &ResourceId) -> WireResourceId {
@@ -807,6 +808,9 @@ fn wire_resource(resource: &ResourceId) -> WireResourceId {
             WireResourceId::DocumentById(document_id.clone())
         }
         ResourceId::Annotations { document_id } => WireResourceId::Annotations(document_id.clone()),
+        ResourceId::ResearchOriginal { source_id } => {
+            WireResourceId::ResearchOriginal(source_id.clone())
+        }
     }
 }
 
@@ -819,6 +823,7 @@ fn recovery_resource(resource: WireResourceId) -> ResourceId {
         WireResourceId::Document => ResourceId::Document,
         WireResourceId::DocumentById(document_id) => ResourceId::DocumentById { document_id },
         WireResourceId::Annotations(document_id) => ResourceId::Annotations { document_id },
+        WireResourceId::ResearchOriginal(source_id) => ResourceId::ResearchOriginal { source_id },
     }
 }
 

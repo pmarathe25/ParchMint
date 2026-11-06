@@ -1,6 +1,7 @@
 use crate::{
-    DeletionTombstone, DocumentId, DomainError, MetadataFieldDefinition, MetadataFieldId, NodeId,
-    NodeKind, Project, ProjectExportSettings, ProjectNode, ProjectRevision, Resource, ResourceSet,
+    CheckDecisionId, ContinuityDecisionRecord, DeletionTombstone, DocumentId, DomainError,
+    MetadataFieldDefinition, MetadataFieldId, NodeId, NodeKind, Project, ProjectExportSettings,
+    ProjectNode, ProjectRevision, ResearchOriginal, ResearchSourceId, Resource, ResourceSet,
     StyleDefinition, StyleId,
 };
 
@@ -18,6 +19,15 @@ pub enum ProjectCommand {
         parent: NodeId,
         index: usize,
         title: String,
+    },
+    CreateResearchOriginal {
+        id: NodeId,
+        document_id: DocumentId,
+        parent: NodeId,
+        index: usize,
+        title: String,
+        source_id: ResearchSourceId,
+        original: Box<ResearchOriginal>,
     },
     DeleteNode {
         id: NodeId,
@@ -78,6 +88,13 @@ pub enum ProjectCommand {
     },
     SetProjectExportSettings {
         settings: ProjectExportSettings,
+    },
+    SetContinuityDecision {
+        record: Box<ContinuityDecisionRecord>,
+        expected: Option<Box<ContinuityDecisionRecord>>,
+    },
+    RemoveContinuityDecision {
+        id: CheckDecisionId,
     },
     RestoreState(Box<Project>),
 }
@@ -267,6 +284,40 @@ fn apply_to_draft(project: &mut Project, command: ProjectCommand) -> Result<(), 
                 .try_insert_document(id, document_id, parent, index, title)?;
             apply_metadata_defaults(project, id);
         }
+        ProjectCommand::CreateResearchOriginal {
+            id,
+            document_id,
+            parent,
+            index,
+            title,
+            source_id,
+            original,
+        } => {
+            if project.nodes.section(parent) != Some(crate::ProjectSection::Research) {
+                return Err(DomainError::InvalidInput {
+                    field: "research original",
+                    reason: "destination must be in Research",
+                });
+            }
+            if original.document != document_id {
+                return Err(DomainError::InvalidInput {
+                    field: "research original",
+                    reason: "document identity does not match",
+                });
+            }
+            if project.research_originals.contains_key(&source_id) {
+                return Err(DomainError::DuplicateId {
+                    field: "research source",
+                });
+            }
+            ensure_available_node_id(project, id)?;
+            ensure_available_document_id(project, document_id)?;
+            project
+                .nodes
+                .try_insert_document(id, document_id, parent, index, title)?;
+            project.research_originals.insert(source_id, *original);
+            apply_metadata_defaults(project, id);
+        }
         ProjectCommand::DeleteNode {
             id,
             deleted_at_unix_millis,
@@ -329,6 +380,92 @@ fn apply_to_draft(project: &mut Project, command: ProjectCommand) -> Result<(), 
         ProjectCommand::SetProjectExportSettings { settings } => {
             project.export_settings = settings;
         }
+        ProjectCommand::SetContinuityDecision { record, expected } => {
+            record.validate()?;
+            let current = project.continuity_decisions.get(&record.id);
+            if current != expected.as_deref() && current != Some(record.as_ref()) {
+                return Err(DomainError::InvalidInput {
+                    field: "continuity decision",
+                    reason: "decision changed; review it again",
+                });
+            }
+            if let Some(previous) = project.continuity_decisions.get(&record.id)
+                && (!previous.same_issue_as(&record) || previous.rationale != record.rationale)
+            {
+                return Err(DomainError::InvalidInput {
+                    field: "continuity decision",
+                    reason: "captured issue cannot be replaced",
+                });
+            }
+            if project
+                .continuity_decisions
+                .get(&record.id)
+                .is_none_or(|previous| previous != record.as_ref())
+            {
+                let document_node = |document| {
+                    project.nodes.iter().find_map(|(id, node)| {
+                        (node.kind == NodeKind::Document(document)).then_some(*id)
+                    })
+                };
+                let within = |mut node, root| {
+                    loop {
+                        if node == root {
+                            return true;
+                        }
+                        let Some(parent) = project.nodes.parent(node) else {
+                            return false;
+                        };
+                        node = parent;
+                    }
+                };
+                let evidence_nodes = record
+                    .evidence
+                    .iter()
+                    .map(|evidence| document_node(evidence.document))
+                    .collect::<Option<Vec<_>>>();
+                if !project.nodes.contains(record.target)
+                    || record
+                        .evidence_scope
+                        .is_some_and(|scope| !project.nodes.contains(scope))
+                    || record
+                        .excluded
+                        .iter()
+                        .any(|id| !project.nodes.contains(*id))
+                    || evidence_nodes.as_ref().is_none_or(|nodes| {
+                        !nodes.iter().any(|node| within(*node, record.target))
+                            || nodes
+                                .iter()
+                                .any(|node| record.excluded.iter().any(|root| within(*node, *root)))
+                            || record.evidence_scope.is_some_and(|scope| {
+                                nodes.iter().any(|node| {
+                                    !within(*node, record.target) && !within(*node, scope)
+                                })
+                            })
+                    })
+                    || record.evidence.iter().any(|evidence| {
+                        evidence.original.as_ref().is_some_and(|original| {
+                            !project
+                                .research_originals
+                                .get(&original.source_id)
+                                .is_some_and(|source| {
+                                    source.document == evidence.document
+                                        && source.sha256 == original.sha256
+                                })
+                        })
+                    })
+                {
+                    return Err(DomainError::InvalidInput {
+                        field: "continuity decision",
+                        reason: "captured source is no longer available",
+                    });
+                }
+            }
+            project.continuity_enabled = true;
+            project.continuity_decisions.insert(record.id, *record);
+        }
+        ProjectCommand::RemoveContinuityDecision { id } => {
+            project.continuity_decisions.remove(&id);
+        }
         ProjectCommand::RestoreState(snapshot) => {
             if snapshot.id != project.id {
                 return Err(DomainError::InvalidInput {
@@ -336,7 +473,9 @@ fn apply_to_draft(project: &mut Project, command: ProjectCommand) -> Result<(), 
                     reason: "project identity does not match",
                 });
             }
+            let continuity_enabled = project.continuity_enabled;
             *project = *snapshot;
+            project.continuity_enabled |= continuity_enabled;
         }
     }
     Ok(())
@@ -431,7 +570,14 @@ fn delete_node(
     let subtree = project.nodes.remove_subtree(id)?;
     // Unfiled nodes are crash-recoverable tab drafts, not filed project items.
     // Explicitly discarding one must not offer it as a recently deleted item.
-    if section == crate::ProjectSection::Unfiled {
+    let contains_original = subtree.iter().any(|entry| match entry.node.kind {
+        NodeKind::Document(document) => project
+            .research_originals
+            .values()
+            .any(|original| original.document == document),
+        _ => false,
+    });
+    if section == crate::ProjectSection::Unfiled && !contains_original {
         return Ok(());
     }
     project.deleted.insert(
@@ -530,12 +676,22 @@ fn copy_document(
         .get(id)
         .ok_or(DomainError::MissingNode { id })?
         .clone();
-    let NodeKind::Document(_) = source.kind else {
+    let NodeKind::Document(document) = source.kind else {
         return Err(DomainError::InvalidInput {
             field: "copy",
             reason: "group copy is deferred",
         });
     };
+    if project
+        .research_originals
+        .values()
+        .any(|original| original.document == document)
+    {
+        return Err(DomainError::InvalidInput {
+            field: "copy",
+            reason: "research originals require the complete duplicate workflow",
+        });
+    }
     let new_node_id = derive_available_node_id(project, id);
     let new_document_id = derive_available_document_id(project, new_node_id);
     let mut copy = source;
@@ -593,6 +749,9 @@ fn changed_resources(before: &Project, after: &Project) -> ResourceSet {
         || before.display_title != after.display_title
         || before.author != after.author
         || before.export_settings != after.export_settings
+        || before.research_originals != after.research_originals
+        || before.continuity_enabled != after.continuity_enabled
+        || before.continuity_decisions != after.continuity_decisions
     {
         changed.insert(Resource::Manifest);
     }
@@ -635,6 +794,98 @@ mod tests {
                 .project;
         assert!(discarded.nodes.get(id).is_none());
         assert!(discarded.deleted.is_empty());
+    }
+
+    #[test]
+    fn deleting_unfiled_document_with_original_retains_a_restorable_tombstone() {
+        use crate::{ResearchOriginal, ResearchSourceId};
+        let project = make_project();
+        let node = NodeId::from_bytes([63; 16]);
+        let document = DocumentId::from_bytes([64; 16]);
+        let mut project = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::create_document(node, document, NodeId::unfiled_root(), 0, "Source"),
+        )
+        .unwrap()
+        .project;
+        project.research_originals.insert(
+            ResearchSourceId::from_bytes([65; 16]),
+            ResearchOriginal {
+                document,
+                filename: "source.pdf".into(),
+                media_type: "application/pdf".into(),
+                source_url: None,
+                retrieved_at_unix_seconds: 0,
+                byte_length: 0,
+                sha256: [0; 32],
+            },
+        );
+        let deleted = apply_project_command(
+            &project,
+            project.revision,
+            ProjectCommand::delete_node(node),
+        )
+        .unwrap()
+        .project;
+        assert!(deleted.deleted.contains_key(&node));
+        assert_eq!(deleted.research_originals.len(), 1);
+        let restored = apply_project_command(
+            &deleted,
+            deleted.revision,
+            ProjectCommand::restore_deleted(node),
+        )
+        .unwrap()
+        .project;
+        assert!(restored.nodes.get(node).is_some());
+        assert_eq!(restored.research_originals, project.research_originals);
+    }
+
+    #[test]
+    fn creating_original_is_one_reversible_research_command() {
+        let before = make_project();
+        let document = DocumentId::from_bytes([66; 16]);
+        let source_id = ResearchSourceId::from_bytes([67; 16]);
+        let original = ResearchOriginal {
+            document,
+            filename: "source.pdf".into(),
+            media_type: "application/pdf".into(),
+            source_url: Some("https://example.com/source.pdf".into()),
+            retrieved_at_unix_seconds: 1,
+            byte_length: 4,
+            sha256: [7; 32],
+        };
+        let command = ProjectCommand::CreateResearchOriginal {
+            id: NodeId::from_bytes([68; 16]),
+            document_id: document,
+            parent: NodeId::research_root(),
+            index: 0,
+            title: "Source".into(),
+            source_id,
+            original: Box::new(original.clone()),
+        };
+        let created = apply_project_command(&before, before.revision, command.clone()).unwrap();
+        assert_eq!(created.project.research_originals[&source_id], original);
+        let undone =
+            apply_project_command(&created.project, created.project.revision, created.inverse)
+                .unwrap()
+                .project;
+        assert!(undone.research_originals.is_empty());
+        assert!(undone.nodes.children(NodeId::research_root()).is_empty());
+        let redone = apply_project_command(&undone, undone.revision, command)
+            .unwrap()
+            .project;
+        assert_eq!(redone.research_originals[&source_id], original);
+        let invalid = ProjectCommand::CreateResearchOriginal {
+            id: NodeId::from_bytes([69; 16]),
+            document_id: DocumentId::from_bytes([70; 16]),
+            parent: NodeId::manuscript_root(),
+            index: 0,
+            title: "Invalid".into(),
+            source_id: ResearchSourceId::from_bytes([71; 16]),
+            original: Box::new(original),
+        };
+        assert!(apply_project_command(&before, before.revision, invalid).is_err());
     }
 
     #[test]

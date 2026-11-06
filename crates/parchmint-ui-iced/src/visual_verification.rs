@@ -13,7 +13,7 @@ use std::borrow::Cow;
 pub enum VisualTarget {
     Launcher,
     EditorSingle,
-    EditorDual,
+    EditorAssistant,
     Cards,
     GlobalSearch,
     History,
@@ -27,7 +27,7 @@ impl VisualTarget {
     pub const ALL: [Self; 10] = [
         Self::Launcher,
         Self::EditorSingle,
-        Self::EditorDual,
+        Self::EditorAssistant,
         Self::Cards,
         Self::GlobalSearch,
         Self::History,
@@ -42,7 +42,7 @@ impl VisualTarget {
         match self {
             Self::Launcher => "launcher-default",
             Self::EditorSingle => "editor-single-default",
-            Self::EditorDual => "editor-dual-default",
+            Self::EditorAssistant => "editor-assistant-default",
             Self::Cards => "cards-default",
             Self::GlobalSearch => "global-search-default",
             Self::History => "history-default",
@@ -60,8 +60,8 @@ impl VisualTarget {
             (Self::Launcher, VisualAppearance::Dark) => "launcher-dark",
             (Self::EditorSingle, VisualAppearance::Light) => "editor-single-light",
             (Self::EditorSingle, VisualAppearance::Dark) => "editor-single-dark",
-            (Self::EditorDual, VisualAppearance::Light) => "editor-dual-light",
-            (Self::EditorDual, VisualAppearance::Dark) => "editor-dual-dark",
+            (Self::EditorAssistant, VisualAppearance::Light) => "editor-assistant-light",
+            (Self::EditorAssistant, VisualAppearance::Dark) => "editor-assistant-dark",
             (Self::Cards, VisualAppearance::Light) => "cards-light",
             (Self::Cards, VisualAppearance::Dark) => "cards-dark",
             (Self::GlobalSearch, VisualAppearance::Light) => "global-search-light",
@@ -120,14 +120,15 @@ const fn spec(target: VisualTarget) -> VisualTargetSpec {
         width: 1440,
         height: 900,
         scale: 2,
-        production_native: true,
+        // The native capture command cannot yet select the Assistant tab.
+        production_native: !matches!(target, VisualTarget::EditorAssistant),
     }
 }
 
 pub const VISUAL_TARGET_SPECS: &[VisualTargetSpec] = &[
     spec(VisualTarget::Launcher),
     spec(VisualTarget::EditorSingle),
-    spec(VisualTarget::EditorDual),
+    spec(VisualTarget::EditorAssistant),
     spec(VisualTarget::Cards),
     spec(VisualTarget::GlobalSearch),
     spec(VisualTarget::History),
@@ -327,9 +328,9 @@ fn production_element(
     )
     .map(ProjectSurfaceMessage::EditorCenter);
     let destination = match target {
-        VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::ErrorRecovery => {
-            RibbonDestination::Editor
-        }
+        VisualTarget::EditorSingle
+        | VisualTarget::EditorAssistant
+        | VisualTarget::ErrorRecovery => RibbonDestination::Editor,
         VisualTarget::Cards => RibbonDestination::Cards,
         VisualTarget::GlobalSearch => RibbonDestination::GlobalSearch,
         VisualTarget::History => RibbonDestination::History,
@@ -338,7 +339,14 @@ fn production_element(
         VisualTarget::RecentlyDeleted => RibbonDestination::RecentlyDeleted,
         VisualTarget::Launcher => unreachable!("launcher returned above"),
     };
-    verification_project_surface(workspace, destination, theme, editor).map(|_| ())
+    verification_project_surface(
+        workspace,
+        destination,
+        theme,
+        editor,
+        target == VisualTarget::EditorAssistant,
+    )
+    .map(|_| ())
 }
 
 #[cfg(feature = "visual-verification")]
@@ -356,14 +364,12 @@ fn editor_slots(
     let mut slots = EditorHostSlots::default();
     if !matches!(
         target,
-        VisualTarget::EditorSingle | VisualTarget::EditorDual | VisualTarget::GlobalSearch
+        VisualTarget::EditorSingle | VisualTarget::EditorAssistant | VisualTarget::GlobalSearch
     ) {
         return slots;
     }
-    for pane in [EditorPane::Primary, EditorPane::Companion] {
-        let Some(document_id) = workspace.editor().pane(pane).active_document() else {
-            continue;
-        };
+    let pane = EditorPane::Primary;
+    if let Some(document_id) = workspace.editor().pane(pane).active_document() {
         let document = snapshot
             .documents
             .iter()
@@ -373,7 +379,7 @@ fn editor_slots(
             parchmint_editor_iced::EditorIcedConfig::default(),
         )
         .expect("verification adapter starts");
-        let viewport = verification_editor_viewport(target, pane, workspace);
+        let viewport = verification_editor_viewport(target);
         let theme = presentation(appearance).editor_theme();
         let binding = parchmint_editor_iced::MountedEditorBinding::mount(
             &adapter,
@@ -401,36 +407,22 @@ fn editor_slots(
 /// sensor message before its first frame. The initial geometry must therefore
 /// be the real pane allocation, not a generic editor-sized fallback.
 #[cfg(feature = "visual-verification")]
-fn verification_editor_viewport(
-    target: VisualTarget,
-    pane: crate::EditorPane,
-    workspace: &crate::ProjectWorkspace,
-) -> parchmint_editor_iced::EditorViewport {
-    const EDITOR_SPLITTER_WIDTH: u32 = 8;
+fn verification_editor_viewport(target: VisualTarget) -> parchmint_editor_iced::EditorViewport {
     const FORMAT_TOOLBAR_HEIGHT: u32 = 44;
     const TAB_STRIP_HEIGHT: u32 = 36;
 
     let (width, height) = match target {
-        VisualTarget::EditorSingle => {
+        VisualTarget::EditorSingle | VisualTarget::EditorAssistant => {
             let center = crate::iced_project_surface::verification_center_geometry(
                 crate::RibbonDestination::Editor,
             );
             (
-                center.width,
-                center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
-            )
-        }
-        VisualTarget::EditorDual => {
-            let center = crate::iced_project_surface::verification_center_geometry(
-                crate::RibbonDestination::Editor,
-            );
-            let available_width = center.width - EDITOR_SPLITTER_WIDTH;
-            let portion = match pane {
-                crate::EditorPane::Primary => workspace.editor().split_ratio(),
-                crate::EditorPane::Companion => 1.0 - workspace.editor().split_ratio(),
-            };
-            (
-                (available_width as f64 * portion).round() as u32,
+                center.width
+                    + if target == VisualTarget::EditorSingle {
+                        crate::ShellLayout::for_window(1440, 900).inspector_width()
+                    } else {
+                        0
+                    },
                 center.height - FORMAT_TOOLBAR_HEIGHT - TAB_STRIP_HEIGHT,
             )
         }
@@ -742,23 +734,14 @@ fn verification_workspace(
             let _ = workspace.update(ProjectMessage::OpenHierarchyNode(map.clone()));
             let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
         }
-        VisualTarget::EditorDual => {
+        VisualTarget::EditorAssistant => {
             let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one.clone()));
             for node_id in [chapter_two.clone(), map.clone(), chapter_one.clone()] {
                 let _ = workspace.update(ProjectMessage::OpenHierarchyNode(node_id));
             }
-            for node_id in [
-                chapter_one.clone(),
-                chapter_two.clone(),
-                map.clone(),
-                chapter_two.clone(),
-            ] {
-                let _ = workspace.update(ProjectMessage::OpenHierarchyNodeInCompanion(node_id));
-            }
-            let _ = workspace.update(ProjectMessage::OpenHierarchyNode(chapter_one.clone()));
-            let _ = workspace
-                .editor_mut()
-                .update(crate::EditorMessage::FocusPane(crate::EditorPane::Primary));
+            let _ = workspace.update(ProjectMessage::SelectAssistantTab(
+                crate::AssistantDockTab::Ask,
+            ));
         }
         VisualTarget::Cards => {
             let _ = workspace.update(ProjectMessage::ToggleHierarchyExpanded(part_one));
@@ -993,19 +976,10 @@ fn assert_scenario_contract(
             assert_part_one_expanded(workspace);
             assert_chapter_one_inspector(workspace);
         }
-        VisualTarget::EditorDual => {
+        VisualTarget::EditorAssistant => {
             let primary = workspace.editor().pane(crate::EditorPane::Primary);
-            let companion = workspace.editor().pane(crate::EditorPane::Companion);
             assert_eq!(
                 primary
-                    .tabs()
-                    .iter()
-                    .map(|tab| tab.title())
-                    .collect::<Vec<_>>(),
-                ["Chapter One", "Chapter Two", "Map of the Coast"]
-            );
-            assert_eq!(
-                companion
                     .tabs()
                     .iter()
                     .map(|tab| tab.title())
@@ -1016,10 +990,13 @@ fn assert_scenario_contract(
                 primary.active_document(),
                 primary.tabs().first().map(|tab| tab.id())
             );
-            assert_eq!(
-                companion.active_document(),
-                companion.tabs().get(1).map(|tab| tab.id())
+            assert!(
+                !workspace
+                    .editor()
+                    .pane(crate::EditorPane::Companion)
+                    .is_populated()
             );
+            assert_eq!(workspace.assistant_tab(), crate::AssistantDockTab::Ask);
             assert_part_one_expanded(workspace);
             assert_chapter_one_inspector(workspace);
         }
@@ -1352,7 +1329,10 @@ mod tests {
             let spec = visual_target_spec(target);
             assert_eq!((spec.width, spec.height), (1440, 900));
             assert_eq!(spec.physical_size(), (2880, 1800));
-            assert!(spec.production_native);
+            assert_eq!(
+                spec.production_native,
+                target != VisualTarget::EditorAssistant
+            );
             for appearance in VisualAppearance::ALL {
                 assert!(!target.reference_id(appearance).is_empty());
             }
@@ -1361,48 +1341,20 @@ mod tests {
 
     #[test]
     fn mounted_editor_viewports_match_the_target_pane_allocations() {
-        let snapshot = verification_snapshot(VisualTarget::EditorSingle);
-        let single = verification_workspace(
-            VisualTarget::EditorSingle,
-            VisualAppearance::Light,
-            &snapshot,
-        );
         assert_eq!(
-            verification_editor_viewport(
-                VisualTarget::EditorSingle,
-                crate::EditorPane::Primary,
-                &single,
-            ),
-            parchmint_editor_iced::EditorViewport::new(840.0, 736.0)
+            verification_editor_viewport(VisualTarget::EditorSingle),
+            parchmint_editor_iced::EditorViewport::new(1160.0, 736.0)
                 .expect("single-pane allocation"),
         );
 
-        let dual_snapshot = verification_snapshot(VisualTarget::EditorDual);
-        let dual = verification_workspace(
-            VisualTarget::EditorDual,
-            VisualAppearance::Light,
-            &dual_snapshot,
-        );
-        for pane in [crate::EditorPane::Primary, crate::EditorPane::Companion] {
-            assert_eq!(
-                verification_editor_viewport(VisualTarget::EditorDual, pane, &dual),
-                parchmint_editor_iced::EditorViewport::new(416.0, 736.0)
-                    .expect("dual-pane allocation"),
-            );
-        }
-
-        let search_snapshot = verification_snapshot(VisualTarget::GlobalSearch);
-        let search = verification_workspace(
-            VisualTarget::GlobalSearch,
-            VisualAppearance::Light,
-            &search_snapshot,
-        );
         assert_eq!(
-            verification_editor_viewport(
-                VisualTarget::GlobalSearch,
-                crate::EditorPane::Primary,
-                &search,
-            ),
+            verification_editor_viewport(VisualTarget::EditorAssistant),
+            parchmint_editor_iced::EditorViewport::new(840.0, 736.0)
+                .expect("assistant dock allocation"),
+        );
+
+        assert_eq!(
+            verification_editor_viewport(VisualTarget::GlobalSearch),
             parchmint_editor_iced::EditorViewport::new(760.0, 848.0)
                 .expect("manuscript-only search allocation"),
         );
@@ -1520,9 +1472,12 @@ mod tests {
 
     #[test]
     fn editor_catalog_hydrates_production_snapshot_and_mounts_real_host() {
-        let snapshot = verification_snapshot(VisualTarget::EditorDual);
-        let workspace =
-            verification_workspace(VisualTarget::EditorDual, VisualAppearance::Light, &snapshot);
+        let snapshot = verification_snapshot(VisualTarget::EditorAssistant);
+        let workspace = verification_workspace(
+            VisualTarget::EditorAssistant,
+            VisualAppearance::Light,
+            &snapshot,
+        );
         assert_eq!(
             workspace
                 .editor()
@@ -1531,14 +1486,13 @@ mod tests {
                 .len(),
             3
         );
-        assert_eq!(
-            workspace
+        assert!(
+            !workspace
                 .editor()
                 .pane(crate::EditorPane::Companion)
-                .tabs()
-                .len(),
-            3
+                .is_populated()
         );
+        assert_eq!(workspace.assistant_tab(), crate::AssistantDockTab::Ask);
         assert_eq!(snapshot.documents.len(), 5);
         assert!(snapshot.documents[0].body.contains("harbor held the last"));
         assert!(
@@ -1554,11 +1508,23 @@ mod tests {
         let slots = editor_slots(
             &snapshot,
             &workspace,
-            VisualTarget::EditorDual,
+            VisualTarget::EditorAssistant,
             VisualAppearance::Light,
         );
         assert!(slots.slot(crate::EditorPane::Primary).is_some());
-        assert!(slots.slot(crate::EditorPane::Companion).is_some());
+        assert!(slots.slot(crate::EditorPane::Companion).is_none());
+    }
+
+    #[test]
+    fn assistant_catalog_shows_the_unconfigured_dock() {
+        let spec = visual_target_spec(VisualTarget::EditorAssistant);
+        let mut simulator = Simulator::<()>::with_size(
+            visual_settings(),
+            Size::new(spec.width as f32, spec.height as f32),
+            production_element(VisualTarget::EditorAssistant, VisualAppearance::Dark),
+        );
+        assert!(simulator.find("No AI API key has been set up.").is_ok());
+        assert!(simulator.find("Open Settings").is_ok());
     }
 
     #[test]

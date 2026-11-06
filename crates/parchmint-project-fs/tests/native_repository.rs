@@ -51,6 +51,23 @@ fn only_html_file(root: &Path) -> PathBuf {
 }
 
 #[test]
+fn bounded_reads_reject_oversized_project_resources() {
+    let parent = TestDir::new("bounded-resource");
+    let project_path = parent.join("novel");
+    let files = NativeProjectFileSystem::new();
+    let (root, _lease) = files
+        .create_root(UntrustedProjectPath::new(project_path.clone()))
+        .unwrap();
+    fs::write(project_path.join("source.bin"), b"1234").unwrap();
+    let path = CanonicalRelativePath::parse("source.bin").unwrap();
+    assert_eq!(files.read_bounded(&root, &path, 4).unwrap(), b"1234");
+    assert!(matches!(
+        files.read_bounded(&root, &path, 3),
+        Err(FsError::Corrupt { .. })
+    ));
+}
+
+#[test]
 fn create_is_durable_and_a_new_repository_can_open_the_project() {
     let parent = TestDir::new("create-open");
     let project_path = parent.join("novel");
@@ -90,6 +107,32 @@ fn create_is_durable_and_a_new_repository_can_open_the_project() {
             .load_document(DocumentId::new("first-document"))
             .expect("document should load after reopen"),
         b"<p data-block-id=\"first\">First draft</p>"
+    );
+}
+
+#[test]
+fn open_rejects_a_v1_marker_with_a_continuity_extension_without_writing() {
+    let parent = TestDir::new("mismatched-continuity-version");
+    let project_path = parent.join("novel");
+    let repository = FsProjectRepository::native();
+    let created = repository.create(request(project_path.clone())).unwrap();
+    drop(created);
+    drop(repository);
+    let manifest = b"[project]\ntitle = \"Native project\"\n[parchmint-continuity]\nversion = 1\nrecords = []\n";
+    fs::write(project_path.join("project.toml"), manifest).unwrap();
+    let repository = FsProjectRepository::native();
+    assert!(
+        repository
+            .open(ProjectPath::new(project_path.clone()))
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(project_path.join("project.toml")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        fs::read(project_path.join(".parchmint/format-version")).unwrap(),
+        b"1\n"
     );
 }
 

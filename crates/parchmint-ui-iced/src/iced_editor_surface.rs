@@ -147,7 +147,6 @@ pub(crate) enum EditorCenterMessage {
         action: text_editor::Action,
     },
     BeginComment,
-    BeginSplitResize,
     HierarchyDropTarget(EditorPane),
     ClearHierarchyDropTarget(EditorPane),
     Workspace(EditorMessage),
@@ -180,7 +179,6 @@ impl EditorCenterMessage {
             | Self::NewTab(_)
             | Self::OpenDocumentContext { .. }
             | Self::BeginComment
-            | Self::BeginSplitResize
             | Self::HierarchyDropTarget(_)
             | Self::ClearHierarchyDropTarget(_) => Vec::new(),
             Self::Workspace(message) => vec![message.clone()],
@@ -276,19 +274,6 @@ pub(crate) fn editor_center_surface_with_breadcrumbs_at_width<'a>(
     hierarchy_drag_active: bool,
     content_width: Option<f32>,
 ) -> Element<'a, EditorCenterMessage> {
-    let companion_visible = workspace.companion_is_visible();
-    let expanded = workspace.expanded_pane();
-    let ratio = workspace.split_ratio() as f32;
-    let (primary_measure, companion_measure) = content_width.map_or((None, None), |width| {
-        if expanded == Some(EditorPane::Primary) || !companion_visible {
-            (Some(width), None)
-        } else if expanded == Some(EditorPane::Companion) {
-            (None, Some(width))
-        } else {
-            let available = (width - 8.0).max(1.0);
-            (Some(available * ratio), Some(available * (1.0 - ratio)))
-        }
-    });
     let primary = editor_pane_surface(
         workspace,
         EditorPane::Primary,
@@ -300,123 +285,14 @@ pub(crate) fn editor_center_surface_with_breadcrumbs_at_width<'a>(
             .get(&EditorPane::Primary)
             .cloned()
             .unwrap_or_default(),
-        primary_measure,
+        content_width,
     );
-    let primary_portion = (workspace.split_ratio() * 1000.0).round() as u16;
-    let companion = editor_pane_surface(
-        workspace,
-        EditorPane::Companion,
-        theme,
-        slots,
-        spelling_menu,
-        hierarchy_drag_active,
-        breadcrumbs
-            .get(&EditorPane::Companion)
-            .cloned()
-            .unwrap_or_default(),
-        companion_measure,
-    );
-    let splitter = mouse_area(
-        stack![
-            column![
-                container(Space::new())
-                    .width(8)
-                    .height(32)
-                    .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest)),
-                container(Space::new())
-                    .width(8)
-                    .height(Length::Fill)
-                    .style(move |_| {
-                        components::surface(theme, Surface::Manuscript, Interaction::Rest)
-                    }),
-            ]
-            .spacing(0),
-            container(
-                container(Space::new().width(1).height(Length::Fill)).style(move |_| {
-                    iced::widget::container::Style {
-                        background: Some(theme.palette().divider.into()),
-                        ..Default::default()
-                    }
-                }),
-            )
-            .width(8)
-            .height(Length::Fill)
-            .align_x(Horizontal::Center),
-        ]
-        .width(8)
-        .height(Length::Fill),
-    )
-    .on_press(EditorCenterMessage::BeginSplitResize)
-    .interaction(iced::mouse::Interaction::ResizingHorizontally);
-    let panes = crate::motion::row_editor(vec![
-        crate::motion::slot(
-            primary,
-            Length::FillPortion(primary_portion),
-            expanded != Some(EditorPane::Companion),
-        ),
-        crate::motion::slot(
-            splitter,
-            Length::Fixed(8.0),
-            companion_visible && expanded.is_none(),
-        ),
-        crate::motion::slot(
-            companion,
-            Length::FillPortion(1000_u16.saturating_sub(primary_portion)),
-            companion_visible && expanded != Some(EditorPane::Primary),
-        ),
-    ]);
-
-    let center = container(panes)
+    container(primary)
         .width(Length::Fill)
         .height(Length::Fill)
         .padding(0)
-        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest));
-    let companion_toggle = stationary_tooltip::tooltip(
-        harness_target::target(
-            HarnessTarget::ToggleCompanion,
-            button(container(icon_sized(Icon::SplitEditor, 16)).center(Length::Fill))
-                .width(32)
-                .height(32)
-                .padding(0)
-                .on_press(EditorCenterMessage::Workspace(
-                    EditorMessage::ToggleCompanion,
-                ))
-                .style(move |_, status| {
-                    components::button_style(
-                        theme,
-                        ButtonKind::Quiet,
-                        button_interaction(status, companion_visible),
-                    )
-                }),
-        ),
-        container(
-            text(if companion_visible {
-                "Close second pane"
-            } else {
-                "Open second pane"
-            })
-            .size(12),
-        )
-        .padding([4, 6]),
-        components::surface(theme, Surface::Elevated, Interaction::Rest),
-    );
-    let layers = stack![center]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .push(
-            container(crate::motion::reveal(expanded.is_none(), companion_toggle))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Horizontal::Right)
-                .align_y(Vertical::Top)
-                .padding(iced::Padding {
-                    top: 2.0,
-                    right: 32.0,
-                    bottom: 0.0,
-                    left: 0.0,
-                }),
-        );
-    layers.into()
+        .style(move |_| components::surface(theme, Surface::Panel, Interaction::Rest))
+        .into()
 }
 
 fn spelling_menu_overlay<'a>(
@@ -1136,13 +1012,7 @@ fn editor_pane_surface<'a>(
         pane,
         workspace.focused_pane() == pane,
         workspace.expanded_pane() == Some(pane),
-        pane == workspace
-            .expanded_pane()
-            .unwrap_or(if workspace.companion_is_visible() {
-                EditorPane::Companion
-            } else {
-                EditorPane::Primary
-            }),
+        false,
         workspace.tab_drag_source(pane),
         workspace.tab_drag_target(pane),
         breadcrumb.clone(),
@@ -2558,7 +2428,6 @@ mod tests {
                 | EditorCenterMessage::NewTab(_)
                 | EditorCenterMessage::OpenDocumentContext { .. }
                 | EditorCenterMessage::BeginComment
-                | EditorCenterMessage::BeginSplitResize
                 | EditorCenterMessage::ChooseSpellingAction(_)
                 | EditorCenterMessage::DismissSpellingMenu) => {
                     panic!(
@@ -2699,35 +2568,19 @@ mod tests {
     }
 
     #[test]
-    fn companion_control_stays_in_place_when_opening_or_closing_a_pane() {
-        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
-        let mut positions = Vec::new();
-        for action in [
-            None,
-            Some(EditorMessage::ToggleCompanion),
-            Some(EditorMessage::ToggleCompanion),
-        ] {
-            if let Some(action) = action {
-                workspace.update(action);
-            }
-            let mut simulator = Simulator::with_size(
-                Settings::default(),
-                Size::new(1000.0, 700.0),
-                editor_center_surface(
-                    &workspace,
-                    ParchMintTheme::new(ResolvedAppearance::Light),
-                    &EditorHostSlots::default(),
-                    None,
-                ),
-            );
-            positions.push(
-                simulator
-                    .find(HarnessTarget::ToggleCompanion.id())
-                    .unwrap()
-                    .bounds(),
-            );
-        }
-        assert!(positions.iter().all(|bounds| *bounds == positions[0]));
+    fn editor_has_no_companion_control() {
+        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            Size::new(1000.0, 700.0),
+            editor_center_surface(
+                &workspace,
+                ParchMintTheme::new(ResolvedAppearance::Light),
+                &EditorHostSlots::default(),
+                None,
+            ),
+        );
+        assert!(simulator.find(HarnessTarget::ToggleCompanion.id()).is_err());
     }
 
     #[test]
@@ -2985,7 +2838,7 @@ mod tests {
             )],
         );
         workspace.update(EditorMessage::SetCommentHover {
-            pane: EditorPane::Companion,
+            pane: EditorPane::Primary,
             comment_id: Some(comment_id.clone()),
             anchor_bounds: Rect::new(24.0, 36.0, 30.0, 14.0),
         });
@@ -3319,14 +3172,18 @@ mod tests {
     }
 
     #[test]
-    fn secondary_click_on_either_panes_tab_targets_its_document_without_activation() {
-        let workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+    fn secondary_click_on_editor_tabs_targets_the_document_without_activation() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: crate::TabSpec::new("chapter-two", "Chapter Two"),
+        });
         let mut slots = EditorHostSlots::default();
         for pane in [EditorPane::Primary, EditorPane::Companion] {
             slots.insert(pane, EditorPaneSlot::state(EditorCenterPaneState::Loading));
         }
-        for pane in [EditorPane::Primary, EditorPane::Companion] {
-            let document = workspace.pane(pane).tabs()[0].id();
+        for document in ["chapter-one", "chapter-two"] {
+            let pane = EditorPane::Primary;
             let mut simulator = Simulator::with_size(
                 Settings::default(),
                 Size::new(960.0, 600.0),
@@ -3405,8 +3262,16 @@ mod tests {
     }
 
     #[test]
-    fn rendered_panes_switch_toolbar_and_inspector_targets_with_focus() {
+    fn rendered_tabs_switch_toolbar_and_inspector_targets() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        workspace.update(EditorMessage::OpenTab {
+            pane: EditorPane::Primary,
+            tab: crate::TabSpec::new("chapter-two", "Chapter Two"),
+        });
+        workspace.update(EditorMessage::ActivateTab {
+            pane: EditorPane::Primary,
+            document_id: "chapter-one".into(),
+        });
         let (_, _, mut slots) = shared_document_slots(&workspace);
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
 
@@ -3417,10 +3282,14 @@ mod tests {
         );
         simulator
             .click("Chapter Two")
-            .expect("rendered companion tab");
+            .expect("rendered chapter tab");
         let messages = simulator.into_messages().collect::<Vec<_>>();
-        assert!(apply_surface_messages(&mut workspace, &mut slots, messages).is_empty());
-        assert_eq!(workspace.focused_pane(), EditorPane::Companion);
+        assert!(matches!(
+            apply_surface_messages(&mut workspace, &mut slots, messages).as_slice(),
+            [crate::EditorEffect::MountDocument { pane: EditorPane::Primary, document_id, .. }]
+                if document_id == "chapter-two"
+        ));
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
         assert_eq!(
             workspace.inspector_context(),
             &crate::InspectorContext::Document {
@@ -3445,8 +3314,8 @@ mod tests {
                     command: crate::EditorCommand::ToggleBold,
                 },
                 crate::EditorEffect::RestoreEditorFocus { view: restored_view },
-            ] if *view == workspace.pane(EditorPane::Companion).view()
-                && *restored_view == workspace.pane(EditorPane::Companion).view()
+            ] if *view == workspace.pane(EditorPane::Primary).view()
+                && *restored_view == workspace.pane(EditorPane::Primary).view()
         ));
 
         let mut simulator = Simulator::with_size(
@@ -3624,7 +3493,7 @@ mod tests {
         let theme = ParchMintTheme::new(ResolvedAppearance::Light);
         let primary_view = workspace.pane(EditorPane::Primary).view();
         let companion_view = workspace.pane(EditorPane::Companion).view();
-        workspace.update(EditorMessage::FocusPane(EditorPane::Companion));
+        workspace.update(EditorMessage::FocusPane(EditorPane::Primary));
         workspace.update(EditorMessage::OpenLocalFind);
 
         let mut simulator = Simulator::with_size(
@@ -3636,8 +3505,8 @@ mod tests {
         assert_eq!(simulator.typewrite("river"), iced::event::Status::Captured);
         let messages = simulator.into_messages().collect::<Vec<_>>();
         apply_surface_messages(&mut workspace, &mut slots, messages);
-        assert_eq!(workspace.local_search(companion_view).query(), "river");
-        assert!(workspace.local_search(primary_view).query().is_empty());
+        assert_eq!(workspace.local_search(primary_view).query(), "river");
+        assert!(workspace.local_search(companion_view).query().is_empty());
         workspace.update(EditorMessage::SetFindMatches(vec![FindMatch::new(0, 5)]));
 
         let mut simulator = Simulator::with_size(
@@ -3648,7 +3517,7 @@ mod tests {
         simulator.click("Replace…").expect("visible replace toggle");
         let messages = simulator.into_messages().collect::<Vec<_>>();
         apply_surface_messages(&mut workspace, &mut slots, messages);
-        assert!(workspace.local_search(companion_view).replace_visible());
+        assert!(workspace.local_search(primary_view).replace_visible());
 
         let mut simulator = Simulator::with_size(
             Settings::default(),
@@ -3663,15 +3532,15 @@ mod tests {
         apply_surface_messages(&mut workspace, &mut slots, messages);
         assert_eq!(
             slots
-                .slot(EditorPane::Companion)
-                .expect("companion slot")
+                .slot(EditorPane::Primary)
+                .expect("primary slot")
                 .replace_draft(),
             "scene"
         );
         assert!(
             slots
-                .slot(EditorPane::Primary)
-                .expect("primary slot")
+                .slot(EditorPane::Companion)
+                .expect("companion slot")
                 .replace_draft()
                 .is_empty()
         );
@@ -3690,13 +3559,13 @@ mod tests {
             [crate::EditorEffect::Command {
                 view,
                 command: crate::EditorCommand::ReplaceAllFindMatches { replacement },
-            }] if *view == companion_view && replacement == "scene"
+            }] if *view == primary_view && replacement == "scene"
         ));
-        assert_eq!(workspace.focused_pane(), EditorPane::Companion);
-        assert!(!workspace.local_search(primary_view).is_open());
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert!(!workspace.local_search(companion_view).is_open());
     }
     #[test]
-    fn focus_mode_animates_the_mounted_pane_to_full_width() {
+    fn focus_mode_keeps_the_single_mounted_editor_at_full_width() {
         use iced::advanced::renderer::Headless;
         use iced::advanced::widget::{Operation, operation};
         use iced_test::{
@@ -3797,7 +3666,8 @@ mod tests {
             }
         }
         assert_eq!(widths[0], initial);
-        assert!(widths[1] > initial && widths[1] < widths[2]);
+        assert_eq!(widths[1], initial);
+        assert_eq!(widths[2], initial);
         assert_eq!(
             widths[2], 800.0,
             "focused writing surface retains its readable measure"

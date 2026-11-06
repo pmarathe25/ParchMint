@@ -1525,6 +1525,8 @@ pub struct EditorWorkspace {
     promoting_scratch: BTreeSet<String>,
     next_scratch: u64,
     initial_prose: BTreeSet<String>,
+    draft_transfer_attempts: BTreeMap<String, u64>,
+    failed_draft_transfers: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1620,6 +1622,7 @@ impl EditorWorkspace {
         self.scratch_tabs.insert(document.to_owned(), content);
         self.promoting_scratch.insert(document.to_owned());
         self.initial_prose.insert(document.to_owned());
+        self.draft_transfer_attempts.insert(document.to_owned(), 0);
         Some(text)
     }
 
@@ -1628,11 +1631,43 @@ impl EditorWorkspace {
             return None;
         }
         self.scratch_tabs
-            .remove(document)
+            .get(document)
             .map(|content| content.text())
     }
 
+    pub(crate) fn rearm_initial_prose(&mut self, document: &str) {
+        if self.scratch_tabs.contains_key(document)
+            && self.promoting_scratch.contains(document)
+            && !self.failed_draft_transfers.contains(document)
+        {
+            if let Some(attempt) = self.draft_transfer_attempts.get_mut(document) {
+                *attempt = attempt.saturating_add(1);
+            }
+            self.initial_prose.insert(document.to_owned());
+        }
+    }
+
+    pub(crate) fn draft_transfer_attempt(&self, document: &str) -> Option<u64> {
+        (!self.failed_draft_transfers.contains(document))
+            .then(|| self.draft_transfer_attempts.get(document).copied())
+            .flatten()
+    }
+
+    pub(crate) fn fail_draft_transfer(&mut self, document: &str) {
+        self.initial_prose.remove(document);
+        self.failed_draft_transfers.insert(document.to_owned());
+    }
+
+    pub(crate) fn initial_prose_pending(&self, document: &str) -> bool {
+        self.initial_prose.contains(document)
+    }
+
     pub(crate) fn finish_initial_prose(&mut self, document: &str) {
+        self.scratch_tabs.remove(document);
+        self.scratch_formats.remove(document);
+        self.initial_prose.remove(document);
+        self.draft_transfer_attempts.remove(document);
+        self.failed_draft_transfers.remove(document);
         self.promoting_scratch.remove(document);
     }
 
@@ -1750,6 +1785,8 @@ impl EditorWorkspace {
             promoting_scratch: BTreeSet::new(),
             next_scratch: 0,
             initial_prose: BTreeSet::new(),
+            draft_transfer_attempts: BTreeMap::new(),
+            failed_draft_transfers: BTreeSet::new(),
         }
     }
 
@@ -1867,6 +1904,8 @@ impl EditorWorkspace {
             promoting_scratch: BTreeSet::new(),
             next_scratch: 0,
             initial_prose: BTreeSet::new(),
+            draft_transfer_attempts: BTreeMap::new(),
+            failed_draft_transfers: BTreeSet::new(),
         }
     }
 
@@ -2130,43 +2169,34 @@ impl EditorWorkspace {
         active_documents: &BTreeMap<ViewId, String>,
     ) {
         self.expanded_pane = None;
-        self.companion_hidden = false;
+        self.companion_hidden = true;
         self.primary.tabs.clear();
         self.primary.active_tab = None;
         self.companion.tabs.clear();
         self.companion.active_tab = None;
         for (view, tab) in tabs {
-            if view == self.primary.view {
-                self.primary.tabs.push(tab);
-            } else if view == self.companion.view {
-                self.companion.tabs.push(tab);
-            }
-        }
-        self.primary.active_tab = active_documents
-            .get(&self.primary.view)
-            .and_then(|active| self.primary.tabs.iter().position(|tab| tab.id() == active))
-            .or_else(|| (!self.primary.tabs.is_empty()).then_some(0));
-        self.companion.active_tab = active_documents
-            .get(&self.companion.view)
-            .and_then(|active| {
-                self.companion
+            if (view == self.primary.view || view == self.companion.view)
+                && !self
+                    .primary
                     .tabs
                     .iter()
-                    .position(|tab| tab.id() == active)
-            })
-            .or_else(|| (!self.companion.tabs.is_empty()).then_some(0));
-        if let Some(offset) = scroll_offsets.get(&self.primary.view) {
+                    .any(|existing| existing.id() == tab.id())
+            {
+                self.primary.tabs.push(tab);
+            }
+        }
+        let selected_view = active_view
+            .filter(|view| *view == self.primary.view || *view == self.companion.view)
+            .unwrap_or(self.primary.view);
+        self.primary.active_tab = active_documents
+            .get(&selected_view)
+            .or_else(|| active_documents.get(&self.primary.view))
+            .and_then(|active| self.primary.tabs.iter().position(|tab| tab.id() == active))
+            .or_else(|| (!self.primary.tabs.is_empty()).then_some(0));
+        if let Some(offset) = scroll_offsets.get(&selected_view) {
             self.primary.scroll_offset = *offset;
         }
-        if let Some(offset) = scroll_offsets.get(&self.companion.view) {
-            self.companion.scroll_offset = *offset;
-        }
-        self.focused_pane =
-            if active_view == Some(self.companion.view) && self.companion.is_populated() {
-                EditorPane::Companion
-            } else {
-                EditorPane::Primary
-            };
+        self.focused_pane = EditorPane::Primary;
         self.inspector = self
             .pane(self.focused_pane)
             .active_document()
@@ -2726,6 +2756,9 @@ impl EditorWorkspace {
                     .collect()
             }
             EditorMessage::ToggleCompanion => {
+                if matches!(self.source, EditorWorkspaceSource::Production) {
+                    return Vec::new();
+                }
                 let companion_visible = self.companion_is_visible()
                     && self.expanded_pane() != Some(EditorPane::Primary);
                 self.exit_pane_focus();
@@ -2780,6 +2813,9 @@ impl EditorWorkspace {
                 effects
             }
             EditorMessage::MoveTabToOtherPane { pane, document_id } => {
+                if matches!(self.source, EditorWorkspaceSource::Production) {
+                    return Vec::new();
+                }
                 let target = match pane {
                     EditorPane::Primary => EditorPane::Companion,
                     EditorPane::Companion => EditorPane::Primary,
@@ -3771,7 +3807,7 @@ fn append_section_documents(
             });
             match section {
                 ProjectSection::Manuscript => manuscript_documents.push(id),
-                ProjectSection::Research => research_documents.push(id),
+                ProjectSection::Lore | ProjectSection::Research => research_documents.push(id),
                 ProjectSection::Unfiled => {}
             }
         }
@@ -3957,6 +3993,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_workspace_views_merge_into_one_tab_strip() {
+        let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
+        let primary = workspace.primary.view;
+        let companion = workspace.companion.view;
+        workspace.restore_workspace_views(
+            vec![
+                (primary, TabSpec::new("chapter", "Chapter")),
+                (primary, TabSpec::new("draft-one", "Untitled")),
+                (companion, TabSpec::new("chapter", "Chapter")),
+                (companion, TabSpec::new("draft-two", "Untitled")),
+            ],
+            Some(companion),
+            &BTreeMap::from([(primary, 12.0), (companion, 34.0)]),
+            &BTreeMap::from([(primary, "chapter".into()), (companion, "draft-two".into())]),
+        );
+        assert_eq!(
+            workspace
+                .primary
+                .tabs
+                .iter()
+                .map(TabSpec::id)
+                .collect::<Vec<_>>(),
+            ["chapter", "draft-one", "draft-two"]
+        );
+        assert_eq!(workspace.primary.active_document(), Some("draft-two"));
+        assert_eq!(workspace.primary.scroll_offset(), 34.0);
+        assert_eq!(workspace.focused_pane(), EditorPane::Primary);
+        assert!(workspace.companion.tabs.is_empty());
+    }
+
+    #[test]
     fn cross_pane_tab_drags_commit_once_and_cancel_outside_the_panes() {
         let mut workspace = EditorWorkspace::from_fixture(EditorFixture::DualPane);
         workspace.update(EditorMessage::BeginTabDrag {
@@ -4013,6 +4080,8 @@ mod tests {
             Some("ABC")
         );
         assert!(workspace.take_initial_prose("new-document").is_none());
+        assert!(workspace.scratch("new-document").is_some());
+        workspace.finish_initial_prose("new-document");
         assert!(workspace.scratch("new-document").is_none());
     }
 

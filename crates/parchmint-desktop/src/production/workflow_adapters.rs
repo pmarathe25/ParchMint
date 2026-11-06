@@ -226,6 +226,15 @@ impl ProjectSnapshotQuery for ProductionProjectQuery {
         self.register_recovery_bases(&snapshot.documents)?;
         Ok(snapshot)
     }
+
+    fn research_original_bytes(
+        &self,
+        source_id: parchmint_domain::ResearchSourceId,
+    ) -> Result<Vec<u8>, ProjectQueryError> {
+        self.persistence
+            .research_original_bytes(source_id)
+            .map_err(map_project_query_error)
+    }
 }
 
 #[cfg(test)]
@@ -474,6 +483,7 @@ impl ProjectPersistencePort for SearchRefreshingPersistence {
 }
 
 pub(super) struct ProductionProjectWorkflows {
+    pub(super) project_root: PathBuf,
     pub(super) history: Arc<ControlledHistory>,
     pub(super) persistence: Arc<ProjectPersistenceCoordinator>,
     pub(super) query: Arc<ProductionProjectQuery>,
@@ -493,6 +503,119 @@ pub(super) struct ActiveExportOperation {
 }
 
 impl ProjectWorkflowPort for ProductionProjectWorkflows {
+    fn set_continuity_decision(
+        &self,
+        record: parchmint_domain::ContinuityDecisionRecord,
+        expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let saved = self
+            .persistence
+            .set_continuity_decision(record, expected)
+            .map_err(map_project_workflow_error)?;
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.checkpoint,
+        })
+    }
+
+    fn save_research_original(
+        &self,
+        source_id: parchmint_domain::ResearchSourceId,
+        destination: parchmint_platform_api::UntrustedPathSelection,
+    ) -> Result<(), ProjectQueryError> {
+        let bytes = self
+            .persistence
+            .research_original_bytes(source_id)
+            .map_err(map_project_workflow_error)?;
+        save_original_copy(&self.project_root, destination.as_path(), &bytes)
+    }
+    fn fetch_research_original(
+        &self,
+        request: parchmint_ui_api::FetchResearchOriginalWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let current = self.query.snapshot()?;
+        if current.project.nodes.section(request.document.parent)
+            != Some(parchmint_domain::ProjectSection::Research)
+            || !current
+                .project
+                .nodes
+                .get(request.document.parent)
+                .is_some_and(|node| node.kind.can_have_children())
+        {
+            return Err(ProjectQueryError::not_started(
+                "Choose a Research destination before importing.",
+            ));
+        }
+        let saved = if current
+            .project
+            .research_originals
+            .contains_key(&request.source_id)
+        {
+            self.persistence
+                .retry_research_original(request.source_id, &request.document, &request.body)
+                .map_err(map_project_workflow_error)?
+        } else {
+            if current.project.nodes.contains(request.document.node)
+                || current.project.nodes.iter().any(|(_, node)| {
+                    node.kind == parchmint_domain::NodeKind::Document(request.document.document)
+                })
+            {
+                return Err(ProjectQueryError::not_started(
+                    "The Research import identity is already in use.",
+                ));
+            }
+            parchmint_project_format::ProjectFormatCodec::default()
+                .decode_document(request.body.as_bytes())
+                .map_err(|_| ProjectQueryError::not_started("The Research document is invalid."))?;
+            let source = parchmint_assistant_http::fetch_research_original(
+                &request.source_url,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .map_err(|error| ProjectQueryError::not_started(error.to_string()))?;
+            let retrieved_at_unix_seconds = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let original = parchmint_domain::ResearchOriginal {
+                document: request.document.document,
+                filename: source.filename,
+                media_type: source.media_type,
+                source_url: Some(source.final_url),
+                retrieved_at_unix_seconds,
+                byte_length: source.bytes.len() as u64,
+                sha256: *parchmint_project_format::ContentHash::of_bytes(&source.bytes).as_bytes(),
+            };
+            self.persistence
+                .create_research_original(parchmint_application::CreateResearchOriginalWorkflow {
+                    document: request.document,
+                    body: request.body,
+                    source_id: request.source_id,
+                    original,
+                    bytes: source.bytes,
+                })
+                .map_err(map_project_workflow_error)?
+        };
+        self.refresh_search();
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.revision.checkpoint,
+        })
+    }
+
+    fn create_research_document(
+        &self,
+        request: parchmint_ui_api::CreateResearchDocumentWorkflow,
+    ) -> Result<ProjectWorkflowSnapshot, ProjectQueryError> {
+        let saved = self
+            .persistence
+            .create_research_document(request)
+            .map_err(map_project_workflow_error)?;
+        self.refresh_search();
+        Ok(ProjectWorkflowSnapshot {
+            snapshot: self.query.snapshot()?,
+            checkpoint: saved.revision.checkpoint,
+        })
+    }
     fn create_document(
         &self,
         request: CreateDocumentWorkflow,
@@ -787,6 +910,36 @@ fn map_export_error(error: ExportError) -> ProjectQueryError {
     ProjectQueryError::new(error.to_string())
 }
 
+fn save_original_copy(
+    project_root: &Path,
+    target: &Path,
+    bytes: &[u8],
+) -> Result<(), ProjectQueryError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| ProjectQueryError::new("Choose a destination outside the project."))?;
+    let parent = fs::canonicalize(parent)
+        .map_err(|_| ProjectQueryError::new("Could not access the destination folder."))?;
+    let root = fs::canonicalize(project_root)
+        .map_err(|_| ProjectQueryError::new("Could not access the project."))?;
+    if parent.starts_with(&root) {
+        return Err(ProjectQueryError::new(
+            "Choose a destination outside the project.",
+        ));
+    }
+    let (mut sink, name, _) = NativeExportSink::acquire(target).map_err(map_export_error)?;
+    let capability = parchmint_export_api::ExportTargetCapability::checked(&name)
+        .map_err(|_| ProjectQueryError::new("The destination filename is invalid."))?;
+    let result = sink
+        .start(&capability)
+        .and_then(|()| sink.write_chunk(bytes))
+        .and_then(|()| sink.finish());
+    if result.is_err() {
+        sink.abort();
+    }
+    result.map_err(map_export_error)
+}
+
 pub(super) struct NativeExportSink {
     target: PathBuf,
     pub(super) temporary: PathBuf,
@@ -1039,5 +1192,34 @@ pub(super) fn spellcheck_fault(kind: ProductionFaultKind) -> SpellcheckError {
         ProductionFaultKind::Io
         | ProductionFaultKind::Corruption
         | ProductionFaultKind::WorkerStopped => SpellcheckError::WorkerStopped,
+    }
+}
+
+#[cfg(test)]
+mod research_original_copy_tests {
+    use super::*;
+
+    #[test]
+    fn copies_exact_bytes_and_refuses_targets_inside_the_project() {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "parchmint-source-copy-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let existing = project.join("project.toml");
+        fs::write(&existing, b"existing project").unwrap();
+        let target = root.join("source.pdf");
+        let original = b"pdf\r\n\0\xff";
+        save_original_copy(&project, &target, original).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), original);
+        assert!(save_original_copy(&project, &existing, original).is_err());
+        assert_eq!(fs::read(&existing).unwrap(), b"existing project");
+        fs::remove_file(target).unwrap();
+        fs::remove_file(existing).unwrap();
+        fs::remove_dir(project).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 //! One resolver for shipped and user-assigned keyboard shortcuts.
 use iced::advanced::{
     Clipboard, Layout, Shell, Widget, layout, mouse, overlay, renderer,
-    widget::{Operation, Tree},
+    widget::{Operation, Tree, tree},
 };
 use iced::{Element, Event, Length, Rectangle, Size, Vector, keyboard};
 use parchmint_preferences::{
@@ -100,9 +100,22 @@ struct ShortcutRouter<'a, Message, Renderer = iced::Renderer> {
     capture: Box<dyn Fn(Option<Shortcut>) -> Message + 'a>,
 }
 
+#[derive(Default)]
+struct ShortcutRouterState {
+    assistant_composing: bool,
+}
+
 impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Renderer>
     for ShortcutRouter<'_, Message, Renderer>
 {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<ShortcutRouterState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(ShortcutRouterState::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -152,6 +165,61 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Rendere
         if shell.is_event_captured() {
             return;
         }
+        if let Event::InputMethod(ime) = event {
+            match ime {
+                iced::advanced::input_method::Event::Preedit(text, _) if !text.is_empty() => {
+                    let mut focus = FocusedAssistantDraft::default();
+                    self.content.as_widget_mut().operate(
+                        &mut tree.children[0],
+                        layout,
+                        renderer,
+                        &mut focus,
+                    );
+                    tree.state
+                        .downcast_mut::<ShortcutRouterState>()
+                        .assistant_composing = focus.0;
+                }
+                iced::advanced::input_method::Event::Preedit(_, _)
+                | iced::advanced::input_method::Event::Commit(_)
+                | iced::advanced::input_method::Event::Closed => {
+                    tree.state
+                        .downcast_mut::<ShortcutRouterState>()
+                        .assistant_composing = false;
+                }
+                iced::advanced::input_method::Event::Opened => {}
+            }
+        }
+        if tree
+            .state
+            .downcast_ref::<ShortcutRouterState>()
+            .assistant_composing
+        {
+            let point = match event {
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => cursor.position(),
+                Event::Touch(iced::touch::Event::FingerPressed { position, .. }) => Some(*position),
+                _ => None,
+            };
+            if let Some(point) = point {
+                let mut focus = FocusedAssistantDraft::default();
+                self.content.as_widget_mut().operate(
+                    &mut tree.children[0],
+                    layout,
+                    renderer,
+                    &mut focus,
+                );
+                let mut send = AssistantSendBounds::default();
+                self.content.as_widget_mut().operate(
+                    &mut tree.children[0],
+                    layout,
+                    renderer,
+                    &mut send,
+                );
+                if focus.0 && send.0.is_some_and(|bounds| bounds.contains(point)) {
+                    shell.capture_event();
+                    return;
+                }
+            }
+        }
         if let Event::Keyboard(keyboard::Event::KeyPressed {
             key,
             modifiers,
@@ -184,6 +252,41 @@ impl<Message, Renderer: renderer::Renderer> Widget<Message, iced::Theme, Rendere
                 }
                 shell.capture_event();
                 return;
+            }
+            // The assistant composer owns the primary-Enter shortcut while
+            // focused; elsewhere it remains the configured editor shortcut.
+            if *key == keyboard::Key::Named(keyboard::key::Named::Enter)
+                && *modifiers == keyboard::Modifiers::COMMAND
+            {
+                let mut focus = FocusedAssistantDraft::default();
+                self.content.as_widget_mut().operate(
+                    &mut tree.children[0],
+                    layout,
+                    renderer,
+                    &mut focus,
+                );
+                if focus.0 {
+                    if tree
+                        .state
+                        .downcast_ref::<ShortcutRouterState>()
+                        .assistant_composing
+                    {
+                        shell.capture_event();
+                        return;
+                    }
+                    self.content.as_widget_mut().update(
+                        &mut tree.children[0],
+                        event,
+                        layout,
+                        cursor,
+                        renderer,
+                        clipboard,
+                        shell,
+                        viewport,
+                    );
+                    shell.capture_event();
+                    return;
+                }
             }
             // Plain Delete belongs to a focused text editor before the outline.
             // Let the real widget consume it, including multiline editors whose
@@ -434,6 +537,41 @@ struct FocusedTextInput {
     focused: bool,
     focused_bounds: Option<Rectangle>,
 }
+
+#[derive(Default)]
+struct FocusedAssistantDraft(bool);
+
+impl Operation for FocusedAssistantDraft {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        id: Option<&iced::widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        if id == Some(&crate::HarnessTarget::AssistantDraft.id()) && state.is_focused() {
+            self.0 = true;
+        }
+    }
+}
+
+#[derive(Default)]
+struct AssistantSendBounds(Option<Rectangle>);
+
+impl Operation for AssistantSendBounds {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: Rectangle) {
+        if id == Some(&crate::harness_target::assistant_send_guard_id()) {
+            self.0 = Some(bounds);
+        }
+    }
+}
 impl Operation for FocusedTextInput {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
         operate(self);
@@ -486,6 +624,103 @@ mod tests {
         Command(&'static str),
         Capture(Option<Shortcut>),
         Text(String),
+        Draft(iced::widget::text_editor::Action),
+        Send,
+    }
+
+    #[test]
+    fn assistant_shortcut_waits_for_ime_composition_to_commit() {
+        use iced::widget::text_editor;
+        let bindings = Keybindings::new();
+        let content = text_editor::Content::with_text("Question ");
+        let editor = iced::widget::text_editor(&content)
+            .id(crate::HarnessTarget::AssistantDraft.id())
+            .on_action(Message::Draft)
+            .key_binding(|press| {
+                if press.key == keyboard::Key::Named(keyboard::key::Named::Enter)
+                    && press.modifiers == keyboard::Modifiers::COMMAND
+                    && matches!(press.status, text_editor::Status::Focused { .. })
+                {
+                    Some(text_editor::Binding::Custom(Message::Send))
+                } else {
+                    text_editor::Binding::from_key_press(press)
+                }
+            });
+        let mut simulator = Simulator::with_size(
+            Settings::default(),
+            iced::Size::new(400.0, 100.0),
+            route(
+                iced::widget::column![
+                    editor,
+                    iced::widget::container(iced::widget::button("Send").on_press(Message::Send))
+                        .id(crate::harness_target::assistant_send_guard_id())
+                ]
+                .into(),
+                &bindings,
+                ShortcutScope::Editor,
+                false,
+                Message::Command,
+                Message::Capture,
+            ),
+        );
+        simulator
+            .click(crate::HarnessTarget::AssistantDraft.id())
+            .unwrap();
+        let enter = || {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                modified_key: keyboard::Key::Named(keyboard::key::Named::Enter),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::COMMAND,
+                repeat: false,
+                text: None,
+            })
+        };
+        simulator.simulate([
+            Event::InputMethod(iced::advanced::input_method::Event::Preedit(
+                "仮".into(),
+                Some(0..3),
+            )),
+            enter(),
+        ]);
+        simulator
+            .click(crate::harness_target::assistant_send_guard_id())
+            .unwrap();
+        simulator.simulate([
+            Event::InputMethod(iced::advanced::input_method::Event::Commit("仮".into())),
+            enter(),
+            Event::InputMethod(iced::advanced::input_method::Event::Preedit(
+                "仮".into(),
+                Some(0..3),
+            )),
+            Event::InputMethod(iced::advanced::input_method::Event::Preedit(
+                String::new(),
+                None,
+            )),
+        ]);
+        simulator
+            .click(crate::harness_target::assistant_send_guard_id())
+            .unwrap();
+        let messages = simulator.into_messages().collect::<Vec<_>>();
+        let commit = messages
+            .iter()
+            .position(|message| {
+                matches!(
+                    message,
+                    Message::Draft(text_editor::Action::Edit(text_editor::Edit::Paste(_)))
+                )
+            })
+            .unwrap();
+        let sends = messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| matches!(message, Message::Send).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(sends.len(), 2);
+        assert!(sends.iter().all(|index| *index > commit));
     }
 
     #[test]

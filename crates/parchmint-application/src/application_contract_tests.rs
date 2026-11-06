@@ -660,6 +660,31 @@ impl SaveCoordinator for FailingSave {
     }
 }
 
+#[derive(Debug, Default)]
+struct FailOnceSave {
+    attempts: AtomicU64,
+    completed: CompletedSave,
+}
+
+impl SaveCoordinator for FailOnceSave {
+    fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError> {
+        if self.attempts.fetch_add(1, Ordering::Relaxed) == 0 {
+            Err(SaveError::WorkerStopped)
+        } else {
+            self.completed.request(request)
+        }
+    }
+    fn status(&self) -> SaveStatusSnapshot {
+        self.completed.status()
+    }
+    fn reconcile_open(&self) -> Result<parchmint_save::OpenReconciliation, SaveError> {
+        self.completed.reconcile_open()
+    }
+    fn cancel_pending(&self, ticket: SaveTicket) -> parchmint_save::CancelOutcome {
+        self.completed.cancel_pending(ticket)
+    }
+}
+
 impl SaveCoordinator for RecordingSave {
     fn request(&self, request: SaveRequest) -> Result<SaveTicket, SaveError> {
         self.requests.lock().unwrap().push(request);
@@ -1369,6 +1394,693 @@ fn created_document_has_a_recovery_base_before_its_first_autosave() {
         .expect("first autosave for a created document should have a recovery base");
 }
 
+#[test]
+fn research_import_creates_validated_body_with_project_undo_and_redo() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(CompletedSave::default()),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let document = DocumentId::from_bytes([0x79; 16]);
+    let node = NodeId::from_bytes([0x78; 16]);
+    let make = |parent| CreateResearchDocumentWorkflow {
+        document: CreateDocumentWorkflow {
+            node,
+            document,
+            parent,
+            index: 0,
+            title: "Source notes".into(),
+        },
+        body: "<p>Evidence from <a href=\"https://example.com\">a source</a>.</p>".into(),
+    };
+    assert!(
+        coordinator
+            .create_research_document(make(parchmint_domain::NodeId::manuscript_root()))
+            .is_err()
+    );
+    assert!(!commands.project().unwrap().nodes.contains(node));
+    coordinator
+        .create_research_document(make(parchmint_domain::NodeId::research_root()))
+        .unwrap();
+    assert!(
+        owner
+            .snapshot(document)
+            .unwrap()
+            .body
+            .contains("https://example.com")
+    );
+    commands.undo_focused(FocusTarget::Tree).unwrap();
+    assert!(!commands.project().unwrap().nodes.contains(node));
+    commands.redo_focused(FocusTarget::Tree).unwrap();
+    assert!(commands.project().unwrap().nodes.contains(node));
+    assert!(owner.snapshot(document).unwrap().body.contains("Evidence"));
+}
+
+#[test]
+fn continuity_decision_upgrade_undo_and_redo_save_consistent_versions() {
+    use parchmint_domain::{
+        CheckDecisionId, ContinuityCategory, ContinuityDecision, ContinuityDecisionRecord,
+        ContinuityEvidence,
+    };
+    let (project, documents, encoding) = persisted_project("Current", "<p>current draft</p>");
+    let document = documents[0].document_id;
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let evidence = |quote: &str| ContinuityEvidence {
+        document,
+        original: None,
+        quote: quote.into(),
+        before: String::new(),
+        after: String::new(),
+        revision: 1,
+        anchor: None,
+    };
+    let id = CheckDecisionId::from_bytes([0x61; 16]);
+    let record = ContinuityDecisionRecord {
+        id,
+        category: ContinuityCategory::Other,
+        explanation: "Review the draft.".into(),
+        decision: ContinuityDecision::Intentional,
+        rationale: None,
+        evidence: [evidence("current"), evidence("draft")],
+        target: group_id(),
+        evidence_scope: None,
+        excluded: Vec::new(),
+        selection_only: false,
+    };
+    let mut stale = record.clone();
+    stale.evidence[0].revision = 0;
+    assert!(coordinator.set_continuity_decision(stale, None).is_err());
+    let mut wrong_target = record.clone();
+    wrong_target.target = NodeId::lore_root();
+    assert!(
+        coordinator
+            .set_continuity_decision(wrong_target, None)
+            .is_err()
+    );
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    assert!(save.requests.lock().unwrap().is_empty());
+    coordinator
+        .set_continuity_decision(record.clone(), None)
+        .unwrap();
+    {
+        let requests = save.requests.lock().unwrap();
+        let writes = &requests[0].writes.writes;
+        assert_eq!(
+            writes
+                .iter()
+                .find(|item| item.path == ".parchmint/format-version")
+                .unwrap()
+                .bytes,
+            b"2\n"
+        );
+        assert!(writes.iter().any(|item| item.path == "project.toml"));
+    }
+    commands.undo_focused(FocusTarget::Tree).unwrap();
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator.await_save(handle).unwrap();
+    assert!(commands.project().unwrap().continuity_enabled);
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    commands.redo_focused(FocusTarget::Tree).unwrap();
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator.await_save(handle).unwrap();
+    assert_eq!(
+        commands.project().unwrap().continuity_decisions.get(&id),
+        Some(&record)
+    );
+    let requests = save.requests.lock().unwrap();
+    for request in &requests[1..] {
+        assert!(
+            request
+                .writes
+                .writes
+                .iter()
+                .all(|item| item.path != ".parchmint/format-version" || item.bytes == b"2\n")
+        );
+    }
+}
+
+#[test]
+fn continuity_validation_does_not_block_saves_and_rejects_concurrent_mutations() {
+    use parchmint_domain::{
+        CheckDecisionId, ContinuityCategory, ContinuityDecision, ContinuityDecisionRecord,
+        ContinuityEvidence,
+    };
+    use std::{sync::mpsc, time::Duration};
+
+    let (project, documents, encoding) = persisted_project("Current", "<p>current draft</p>");
+    let document = documents[0].document_id;
+    let original_document = documents[0].clone();
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save,
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = Arc::new(ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    ));
+    let evidence = |quote: &str| ContinuityEvidence {
+        document,
+        original: None,
+        quote: quote.into(),
+        before: String::new(),
+        after: String::new(),
+        revision: 1,
+        anchor: None,
+    };
+    let record = ContinuityDecisionRecord {
+        id: CheckDecisionId::from_bytes([0x63; 16]),
+        category: ContinuityCategory::Other,
+        explanation: "Review the draft.".into(),
+        decision: ContinuityDecision::Intentional,
+        rationale: None,
+        evidence: [evidence("current"), evidence("draft")],
+        target: group_id(),
+        evidence_scope: None,
+        excluded: Vec::new(),
+        selection_only: false,
+    };
+    let (captured_tx, captured_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let worker_coordinator = coordinator.clone();
+    let worker_record = record.clone();
+    let worker = std::thread::spawn(move || {
+        worker_coordinator.set_continuity_decision_after_validation(worker_record, None, || {
+            captured_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        })
+    });
+    captured_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (saved_tx, saved_rx) = mpsc::channel();
+    let save_coordinator = coordinator.clone();
+    let saving = std::thread::spawn(move || {
+        let result = save_coordinator
+            .request_save(PersistenceSaveKind::Explicit)
+            .and_then(|(handle, _)| save_coordinator.await_save(handle));
+        saved_tx.send(result).unwrap();
+    });
+    let saved = saved_rx.recv_timeout(Duration::from_secs(5));
+    commands
+        .execute_now(ProjectCommand::AddDictionaryWord {
+            word: "unrelated".into(),
+        })
+        .unwrap();
+    resume_tx.send(()).unwrap();
+    assert!(saved.expect("save was blocked by validation").is_ok());
+    saving.join().unwrap();
+    assert!(worker.join().unwrap().is_err());
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    assert_eq!(commands.project_undo_entries().unwrap().len(), 1);
+
+    let result = coordinator.set_continuity_decision_after_validation(record.clone(), None, || {
+        commands
+            .execute_document(DocumentCommand {
+                document_id: document,
+                observed_revision: EditorRevision::from(1),
+                body: "<p>changed draft</p>".into(),
+            })
+            .unwrap();
+    });
+    assert!(result.is_err());
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    assert_eq!(commands.project_undo_entries().unwrap().len(), 1);
+
+    commands
+        .publish_restored_state(commands.project().unwrap(), vec![original_document.clone()])
+        .unwrap();
+    let mut restored_document = original_document.clone();
+    restored_document.body = "<p>restored text</p>".into();
+    let result = coordinator.set_continuity_decision_after_validation(record.clone(), None, || {
+        commands
+            .publish_restored_state(commands.project().unwrap(), vec![restored_document.clone()])
+            .unwrap();
+    });
+    assert!(result.is_err());
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    assert!(commands.project_undo_entries().unwrap().is_empty());
+
+    commands
+        .publish_restored_state(commands.project().unwrap(), vec![original_document])
+        .unwrap();
+    let result = coordinator.set_continuity_decision_after_validation(record, None, || {
+        let saved = commands.capture_save_request().unwrap();
+        commands
+            .publish_restored_document(restored_document, &saved)
+            .unwrap();
+    });
+    assert!(result.is_err());
+    assert!(commands.project().unwrap().continuity_decisions.is_empty());
+    assert!(commands.project_undo_entries().unwrap().is_empty());
+}
+
+#[test]
+fn concurrent_identical_continuity_decisions_leave_one_undoable_record() {
+    use parchmint_domain::{
+        CheckDecisionId, ContinuityCategory, ContinuityDecision, ContinuityDecisionRecord,
+        ContinuityEvidence,
+    };
+    let (project, documents, encoding) = persisted_project("Current", "<p>current draft</p>");
+    let document = documents[0].document_id;
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        Arc::new(CompletedSave::default()),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let evidence = |quote: &str| ContinuityEvidence {
+        document,
+        original: None,
+        quote: quote.into(),
+        before: String::new(),
+        after: String::new(),
+        revision: 1,
+        anchor: None,
+    };
+    let record = ContinuityDecisionRecord {
+        id: CheckDecisionId::from_bytes([0x64; 16]),
+        category: ContinuityCategory::Other,
+        explanation: "Review the draft.".into(),
+        decision: ContinuityDecision::Intentional,
+        rationale: None,
+        evidence: [evidence("current"), evidence("draft")],
+        target: group_id(),
+        evidence_scope: None,
+        excluded: Vec::new(),
+        selection_only: false,
+    };
+    let first = coordinator.set_continuity_decision_after_validation(record.clone(), None, || {
+        coordinator
+            .set_continuity_decision(record.clone(), None)
+            .unwrap();
+    });
+    assert!(first.is_ok());
+    coordinator
+        .set_continuity_decision(record.clone(), None)
+        .unwrap();
+    assert_eq!(
+        commands
+            .project()
+            .unwrap()
+            .continuity_decisions
+            .get(&record.id),
+        Some(&record)
+    );
+    assert_eq!(commands.project_undo_entries().unwrap().len(), 1);
+}
+
+#[test]
+fn continuity_decision_retry_after_failed_save_does_not_duplicate_or_retarget() {
+    use parchmint_domain::{
+        CheckDecisionId, ContinuityCategory, ContinuityDecision, ContinuityDecisionRecord,
+        ContinuityEvidence,
+    };
+    let (project, documents, encoding) = persisted_project("Current", "<p>current draft</p>");
+    let document = documents[0].document_id;
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(FailOnceSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner.clone(),
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let evidence = |quote: &str| ContinuityEvidence {
+        document,
+        original: None,
+        quote: quote.into(),
+        before: String::new(),
+        after: String::new(),
+        revision: 1,
+        anchor: None,
+    };
+    let record = ContinuityDecisionRecord {
+        id: CheckDecisionId::from_bytes([0x62; 16]),
+        category: ContinuityCategory::Other,
+        explanation: "Review the draft.".into(),
+        decision: ContinuityDecision::Intentional,
+        rationale: None,
+        evidence: [evidence("current"), evidence("draft")],
+        target: group_id(),
+        evidence_scope: None,
+        excluded: Vec::new(),
+        selection_only: false,
+    };
+    assert!(
+        coordinator
+            .set_continuity_decision(record.clone(), None)
+            .is_err()
+    );
+    assert_eq!(commands.project().unwrap().continuity_decisions.len(), 1);
+    commands
+        .execute_document(DocumentCommand {
+            document_id: document,
+            observed_revision: EditorRevision::from(1),
+            body: "<p>later edit</p>".into(),
+        })
+        .unwrap();
+    coordinator
+        .set_continuity_decision(record.clone(), None)
+        .unwrap();
+    assert_eq!(
+        commands
+            .project()
+            .unwrap()
+            .continuity_decisions
+            .get(&record.id),
+        Some(&record)
+    );
+    assert_eq!(commands.project_undo_entries().unwrap().len(), 1);
+    assert!(
+        owner
+            .snapshot(document)
+            .unwrap()
+            .body
+            .contains("later edit")
+    );
+}
+
+#[test]
+fn original_research_save_undo_and_redo_preserve_exact_bytes() {
+    use parchmint_domain::{ResearchOriginal, ResearchSourceId};
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let document = DocumentId::from_bytes([0x51; 16]);
+    let node = NodeId::from_bytes([0x52; 16]);
+    let source_id = ResearchSourceId::from_bytes([0x53; 16]);
+    let bytes = b"source\r\n\0\xff".to_vec();
+    let path = format!(
+        "research/originals/{}.bin",
+        parchmint_domain::encode_stable_id(source_id.as_bytes())
+    );
+    coordinator
+        .create_research_original(CreateResearchOriginalWorkflow {
+            document: CreateDocumentWorkflow {
+                node,
+                document,
+                parent: NodeId::research_root(),
+                index: 0,
+                title: "Source".into(),
+            },
+            body: "<p>Source reference</p>".into(),
+            source_id,
+            original: ResearchOriginal {
+                document,
+                filename: "source.pdf".into(),
+                media_type: "application/pdf".into(),
+                source_url: None,
+                retrieved_at_unix_seconds: 1,
+                byte_length: bytes.len() as u64,
+                sha256: *ContentHash::of_bytes(&bytes).as_bytes(),
+            },
+            bytes: bytes.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        save.requests.lock().unwrap()[0]
+            .writes
+            .writes
+            .iter()
+            .find(|write| write.path == path)
+            .unwrap()
+            .bytes,
+        bytes
+    );
+    commands.undo_focused(FocusTarget::Tree).unwrap();
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator.await_save(handle).unwrap();
+    assert!(
+        save.requests.lock().unwrap()[1]
+            .writes
+            .deletions
+            .contains(&path)
+    );
+    commands.redo_focused(FocusTarget::Tree).unwrap();
+    let (handle, _) = coordinator
+        .request_save(PersistenceSaveKind::Explicit)
+        .unwrap();
+    coordinator.await_save(handle).unwrap();
+    assert_eq!(
+        save.requests.lock().unwrap()[2]
+            .writes
+            .writes
+            .iter()
+            .find(|write| write.path == path)
+            .unwrap()
+            .bytes,
+        bytes
+    );
+    let duplicate = coordinator
+        .duplicate_subtrees(DuplicateSubtreesWorkflow {
+            sources: vec![node],
+            parent: NodeId::research_root(),
+            index: 1,
+        })
+        .unwrap();
+    let copied_document = duplicate.document_ids[&document];
+    let project = commands.project().unwrap();
+    let copied_id = project
+        .research_originals
+        .iter()
+        .find_map(|(id, original)| (original.document == copied_document).then_some(*id))
+        .unwrap();
+    assert_ne!(copied_id, source_id);
+    let copied_path = format!(
+        "research/originals/{}.bin",
+        parchmint_domain::encode_stable_id(copied_id.as_bytes())
+    );
+    assert_eq!(
+        save.requests.lock().unwrap()[3]
+            .writes
+            .writes
+            .iter()
+            .find(|write| write.path == copied_path)
+            .unwrap()
+            .bytes,
+        bytes
+    );
+}
+
+#[test]
+fn failed_original_save_keeps_bytes_for_retry() {
+    use parchmint_domain::{ResearchOriginal, ResearchSourceId};
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(FailOnceSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let document = DocumentId::from_bytes([0x54; 16]);
+    let node = NodeId::from_bytes([0x55; 16]);
+    let source_id = ResearchSourceId::from_bytes([0x56; 16]);
+    let bytes = b"original\r\n\0\xff".to_vec();
+    let path = format!(
+        "research/originals/{}.bin",
+        parchmint_domain::encode_stable_id(source_id.as_bytes())
+    );
+    let request = CreateResearchOriginalWorkflow {
+        document: CreateDocumentWorkflow {
+            node,
+            document,
+            parent: NodeId::research_root(),
+            index: 0,
+            title: "Source".into(),
+        },
+        body: "<p>Reference</p>".into(),
+        source_id,
+        original: ResearchOriginal {
+            document,
+            filename: "source.pdf".into(),
+            media_type: "application/pdf".into(),
+            source_url: None,
+            retrieved_at_unix_seconds: 1,
+            byte_length: bytes.len() as u64,
+            sha256: *ContentHash::of_bytes(&bytes).as_bytes(),
+        },
+        bytes: bytes.clone(),
+    };
+    let document_request = request.document.clone();
+    let body = request.body.clone();
+    assert!(coordinator.create_research_original(request).is_err());
+    assert!(commands.project().unwrap().nodes.contains(node));
+    assert!(coordinator.has_unsaved_changes().unwrap());
+    coordinator
+        .retry_research_original(source_id, &document_request, &body)
+        .unwrap();
+    assert_eq!(commands.project().unwrap().research_originals.len(), 1);
+    let requests = save.completed.requests.lock().unwrap();
+    assert_eq!(
+        requests[0]
+            .writes
+            .writes
+            .iter()
+            .find(|write| write.path == path)
+            .unwrap()
+            .bytes,
+        bytes
+    );
+}
+
+#[test]
+fn retrying_a_failed_research_summary_save_does_not_create_a_second_document() {
+    let (project, documents, encoding) = persisted_project("Current", "<p>current</p>");
+    let owner = Arc::new(NativeDocumentStateOwner::new(documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(project, owner.clone()));
+    let save = Arc::new(FailOnceSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        owner,
+        editor,
+        recovery_base_for(&encoding),
+        encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        encoding.paths,
+    );
+    let request = CreateResearchDocumentWorkflow {
+        document: CreateDocumentWorkflow {
+            node: NodeId::from_bytes([0x57; 16]),
+            document: DocumentId::from_bytes([0x58; 16]),
+            parent: NodeId::research_root(),
+            index: 0,
+            title: "Source notes".into(),
+        },
+        body: "<p>Source summary.</p>".into(),
+    };
+    assert!(
+        coordinator
+            .create_research_document(request.clone())
+            .is_err()
+    );
+    coordinator.create_research_document(request).unwrap();
+    assert_eq!(
+        commands
+            .project()
+            .unwrap()
+            .nodes
+            .children(NodeId::research_root())
+            .len(),
+        1
+    );
+    assert_eq!(save.completed.requests.lock().unwrap().len(), 1);
+}
+
 fn project_with_recoverable_comment() -> (
     Arc<ProductionJournal>,
     Arc<NativeDocumentStateOwner>,
@@ -1911,6 +2623,73 @@ fn history_restore_rehydrates_authoritative_state_after_restoration_checkpoint()
         requests[0].checkpoint.category,
         CheckpointCategory::Restoration
     );
+}
+
+#[test]
+fn history_restore_of_legacy_checkpoint_keeps_continuity_format_sticky() {
+    use parchmint_project_format::ProjectFormatCodec;
+    let (mut current_project, current_documents, legacy_current) =
+        persisted_project("Current", "<p>current</p>");
+    current_project.continuity_enabled = true;
+    let bodies = current_documents
+        .iter()
+        .map(|document| (document.document_id, document.body.clone()))
+        .collect();
+    let current_encoding = ProjectFormatCodec::default()
+        .encode_domain_project(
+            &current_project,
+            &bodies,
+            &BTreeMap::new(),
+            &legacy_current.paths,
+        )
+        .unwrap();
+    let (_, _, historical_encoding) = persisted_project("Historical", "<p>historical</p>");
+    let documents = Arc::new(NativeDocumentStateOwner::new(current_documents));
+    let commands = Arc::new(NativeProjectCommandDispatcher::new(
+        current_project,
+        documents.clone(),
+    ));
+    let save = Arc::new(CompletedSave::default());
+    let editor = Arc::new(EditorPersistenceCoordinator::new(
+        Arc::new(ProductionJournal::default()),
+        save.clone(),
+        recovery_base_for(&current_encoding),
+    ));
+    let coordinator = ProjectPersistenceCoordinator::new(
+        commands.clone(),
+        documents,
+        editor,
+        recovery_base_for(&current_encoding),
+        current_encoding
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect(),
+        current_encoding.paths,
+    );
+    coordinator
+        .restore_history(restore_plan(&historical_encoding))
+        .unwrap();
+    assert!(commands.project().unwrap().continuity_enabled);
+    let requests = save.requests.lock().unwrap();
+    let writes = &requests[0].writes.writes;
+    assert_eq!(
+        writes
+            .iter()
+            .find(|item| item.path == ".parchmint/format-version")
+            .unwrap()
+            .bytes,
+        b"2\n"
+    );
+    let manifest = writes
+        .iter()
+        .find(|item| item.path == "project.toml")
+        .unwrap();
+    let codec = ProjectFormatCodec::default();
+    let manifest = codec.decode_manifest(&manifest.bytes).unwrap();
+    codec
+        .validate_manifest_version(parchmint_project_format::FormatVersion::V2, &manifest)
+        .unwrap();
 }
 
 #[test]

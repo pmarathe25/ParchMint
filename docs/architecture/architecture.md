@@ -46,6 +46,10 @@ presentation state and calls those adapters through their interfaces.
 | Rebuildable search index | `.parchmint/cache/search.sqlite`; search-sqlite maintains it |
 | Tabs, panes, scroll, and layout | Application-data directory, keyed by project ID; workspace-state persists it |
 | Appearance, global dictionary, recent projects | Application preference file; preferences serializes changes |
+| Assistant credentials | OS credential store or explicit session-only memory; preferences contain only opaque references |
+| Assistant usage estimates | Application-data journal, shared by project windows in the process |
+| Assistant conversations and drafts | Application-data store keyed by project ID and canonical path; excluded from project backups |
+| Saved original research sources | Manifest-declared opaque project resources; included byte-for-byte in project saves and History |
 
 The manifest includes document word-count summaries. See
 [project-format](../../crates/parchmint-project-format/README.md) for the complete
@@ -64,9 +68,9 @@ History.
 | Pixel scroll, viewport, focus, layout, search and spelling decorations | Each mounted Iced editor view |
 | Temporary fields, menus, tabs, and comment drafts | UI presentation state |
 
-Two panes can share a document session while keeping independent selections and
-viewports. Text remains valid UTF-8; editing and spellcheck currently target
-normal en-US keyboard input.
+The writing workspace mounts one editor view. Open but inactive document tabs
+retain their sessions so their undo histories survive tab switches. Text remains
+valid UTF-8; editing and spellcheck currently target normal en-US keyboard input.
 
 ## Component map
 
@@ -81,6 +85,8 @@ normal en-US keyboard input.
 | [project-repository](../../crates/parchmint-project-repository/README.md) | Project open/read, write leases, and multi-file writer contracts |
 | [project-fs](../../crates/parchmint-project-fs/README.md) | Validated filesystem access, write locking, and recoverable file replacement |
 | [save](../../crates/parchmint-save/README.md) | Serial snapshot writes, matching History checkpoints, and save completion |
+| [assistant-api](../../crates/parchmint-assistant-api/README.md), [assistant-core](../../crates/parchmint-assistant-core/README.md), [assistant-http](../../crates/parchmint-assistant-http/README.md), [assistant-budget](../../crates/parchmint-assistant-budget/README.md) | Assistant contracts, bounded project retrieval, provider access, and local estimated usage |
+| [content-type](../../crates/parchmint-content-type/README.md) | Bounded media-type and charset parsing shared by source import and extraction |
 
 ### Background services
 

@@ -23,5 +23,9 @@ Opening drops references to missing project items and restores the remaining
 views. A missing file uses the default layout. An invalid file is preserved for
 diagnosis and returns a warning with the default layout.
 
+The editor merges legacy primary and companion tabs into one ordered strip,
+deduplicating saved document IDs and retaining the active document and its
+scroll position. The previous on-disk layout remains until the next durable save.
+
 Workspace changes and write failures affect neither project files nor project
 undo, History, or project saving.

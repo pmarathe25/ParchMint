@@ -955,6 +955,7 @@ fn production_snapshot_hydrates_ordered_hierarchy_metadata_deleted_items_and_edi
             id_string(NodeId::manuscript_root().as_bytes()),
             id_string(fixture.group.as_bytes()),
             id_string(fixture.manuscript_node.as_bytes()),
+            id_string(NodeId::lore_root().as_bytes()),
             id_string(NodeId::research_root().as_bytes()),
             id_string(fixture.research_node.as_bytes()),
         ]
@@ -1116,11 +1117,23 @@ fn snapshot_reconciliation_preserves_surviving_ui_state_and_removes_stale_refere
         gesture: SelectionGesture::Replace,
     });
     workspace.update(ProjectMessage::ToggleHierarchyExpanded(group_id.clone()));
+    workspace.update(ProjectMessage::ActivateCard(research_node_id.clone()));
+    assert!(
+        workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .tabs()
+            .iter()
+            .any(|tab| tab.id() == id_string(fixture.research_document.as_bytes()))
+    );
+    workspace.editor_mut().update(EditorMessage::ActivateTab {
+        pane: EditorPane::Primary,
+        document_id: id_string(fixture.manuscript_document.as_bytes()),
+    });
     workspace.editor_mut().update(EditorMessage::OpenLocalFind);
     workspace
         .editor_mut()
         .update(EditorMessage::SetFindQuery("river".into()));
-    workspace.update(ProjectMessage::ActivateCard(research_node_id.clone()));
     workspace.update(ProjectMessage::SelectHierarchy {
         node_id: manuscript_node_id.clone(),
         gesture: SelectionGesture::Replace,
@@ -1168,10 +1181,12 @@ fn snapshot_reconciliation_preserves_surviving_ui_state_and_removes_stale_refere
         "river"
     );
     assert!(
-        !workspace
+        workspace
             .editor()
-            .pane(EditorPane::Companion)
-            .is_populated()
+            .pane(EditorPane::Primary)
+            .tabs()
+            .iter()
+            .all(|tab| { tab.id() != id_string(fixture.research_document.as_bytes()) })
     );
     assert!(workspace.cards().last_activated_document().is_none());
     assert_eq!(

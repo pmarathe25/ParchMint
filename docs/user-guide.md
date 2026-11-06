@@ -9,9 +9,8 @@ Shortcuts use **Ctrl** on Windows and Linux or **Command** on macOS, called the
 
 ParchMint opens your most recent project directly. On first launch it opens
 **My Writing**, a local workspace in the application-data directory. Use the
-project title menu to create or open another project. The Notes sidebar starts
-hidden; the notes button in the status bar reveals it. Opening the companion pane
-for the first time creates an empty tab.
+project title menu to create or open another project. The assistant and Notes
+sidebar starts hidden; the notes button in the status bar reveals it.
 
 ## Create or open a project
 
@@ -23,7 +22,7 @@ choose a recent project. Narrow windows show the project icon instead. Deleted
 project folders are removed from recents when the chooser opens.
 
 Choose **Create Project**, enter a title, and choose a folder. New projects contain
-one Manuscript document, **Untitled Document**, and an empty Research section.
+one Manuscript document, **Untitled Document**, and empty Lore and Research sections.
 Each project has one writable session; opening it again focuses its existing window.
 
 ## Navigate the workspace
@@ -31,9 +30,9 @@ Each project has one writable session; opening it again focuses its existing win
 | Area | Use |
 | --- | --- |
 | Explorer | Navigate documents while writing in Editor |
-| Editor | Write and format documents in one or two panes |
+| Editor | Write and format documents in tabs |
 | Overview | Create the project structure, edit planning details, and rearrange cards |
-| Notes | Find and navigate annotations in writing |
+| Assistant and Notes | Ask questions, check continuity, research sources, and navigate annotations |
 
 The icon rail on the left opens **Editor**, **Overview**, **History**,
 **Recently Deleted**, **Export**, and **Settings**. Hover an icon for its label.
@@ -42,7 +41,7 @@ The project name beside it opens the same menu when Explorer is visible.
 The logo remains available when Explorer is collapsed. The status bar shows
 counts, save state, and sidebar controls.
 
-Drag dividers to resize sidebars and panes. Press **F6** to move focus between
+Drag dividers to resize sidebars. Press **F6** to move focus between
 workspace regions.
 
 Layout, open tabs, scroll positions, and expanded groups are remembered when you
@@ -61,34 +60,25 @@ Explorer’s right-click menu also supports creation. Groups can contain groups
 and documents. Choose **Rename** from an item’s context menu or press **F2**;
 Enter confirms and Escape cancels.
 
-Drag rows before or after siblings, into a group, or between Manuscript and
-Research. **Shift** selects a range; the primary modifier adds individual rows.
+Drag rows before or after siblings, into a group, or between Manuscript, Lore,
+and Research. **Shift** selects a range; the primary modifier adds individual rows.
 Copy and paste duplicates selected documents. Cut and paste moves them.
 
 A single click opens a document as a replaceable preview tab. Double-click,
-press **Enter**, edit, or deliberately open it to keep the tab. Manuscript opens
-in the primary pane; Research normally opens in the companion pane. Closing a
-tab leaves its document in the project. Right-click a tab to close it or move it
-to the other pane. Use Explorer to rename, copy, move, or delete documents.
+press **Enter**, edit, or deliberately open it to keep the tab. Manuscript, Lore,
+and Research documents open in the same editor. Closing a tab leaves its document
+in the project. Use Explorer to rename, copy, move, or delete documents.
 
-Use the split button at the right end of the tab bar to open the companion pane.
-The button stays at the right edge and is highlighted while the companion is open.
-It keeps its tabs when hidden; the first opening creates an empty tab.
-Drag tabs between panes, or drop an Explorer document into either pane to open it.
 Tabs fit their titles; the overflow button lists documents that do not fit.
-Each pane’s upper-right button expands that pane into a temporary focus view.
-Focus view hides the navigation rail, tabs, breadcrumbs, second-pane control,
+The editor's upper-right button expands it into a temporary focus view.
+Focus view hides the navigation rail, tabs, breadcrumbs,
 sidebars, and status bar. The native titlebar also hides when the window is
 maximized; a floating window keeps its titlebar. Fullscreen remains fullscreen.
 **F11** also toggles focus view.
 Choose **Exit focus** in the top bar or press **Escape** to restore the layout.
-When both panes show the same document, edits,
-notes, undo, saves, and word counts are shared; cursors, selections, scrolling,
-and local searches remain independent.
-
-Each editor pane has a **+** button for a new tab (primary modifier plus **T**).
+The editor has a **+** button for a new tab (primary modifier plus **T**).
 Start writing before choosing a location. **Save** (primary modifier plus **S**)
-asks for a name and a location in Manuscript or Research. Expand folders in the
+asks for a name and a location in Manuscript, Lore, or Research. Expand folders in the
 location tree to choose a parent. Tab moves between locations; Left and Right
 collapse or expand the focused folder. Closing a changed draft
 offers Save, Don’t Save, and Cancel. Empty, unchanged tabs close without creating
@@ -96,7 +86,7 @@ project documents. Drafts receive autosave and recovery protection; their words
 are excluded from manuscript totals and export until filed in Manuscript.
 Choosing **Don’t Save** discards the draft without adding it to Recently Deleted.
 
-Overview has its own Manuscript/Research switch and group disclosures. Collapsing
+Overview has its own section switch and group disclosures. Collapsing
 Explorer groups does not hide cards. Explorer hides while Overview is open.
 Document cards sit beside each other when space permits. Each group is a larger
 card enclosing its nested groups and documents. Click synopsis or metadata text to edit it, drag a title
@@ -147,7 +137,7 @@ retains supported formatting, including ParchMint's font attributes.
 Word counts update as you write. In Editor, the status bar labels the current
 Document or text Selection count. In Overview, Selected totals the selected
 chapters and groups without counting overlapping selections twice. Manuscript
-shows all manuscript document text; Research is excluded. Synopsis and metadata never contribute to word counts.
+shows all manuscript document text; Lore and Research are excluded. Synopsis and metadata never contribute to word counts.
 
 Create and edit paragraph styles from **Manage Styles** at the bottom of the style dropdown.
 Manage metadata with **Fields…** in Overview; new fields appear on outline rows.
@@ -183,12 +173,128 @@ as a separate note at the original anchor.
 
 A draft stays attached to its original document and selection while you consult
 Research. If that document changes before submission, ParchMint keeps the draft
-and asks you to select its text again. Scrolling another pane keeps the toolbar
-on the last focused editor; click that pane's text to edit it.
+and asks you to select its text again.
+
+## Use the assistant
+
+Open the sidebar with the status-bar notes button and choose **Ask**, **Check**,
+**Research**, or **Notes**. In **Settings → AI assistant**, choose OpenAI,
+Anthropic, or an OpenAI-compatible endpoint, enter a model for that provider,
+and save your own API key. Each provider requires its own account and key;
+OpenAI credits do not pay for other providers. Keys are
+kept in the operating system's credential store, or in memory for the current
+session if you choose that option. A compatible local endpoint can be used
+without a key. Different providers and models support different capabilities.
+Each assistant mode has its own conversations. Use the conversation selector to
+switch, **+** to start another, and **⋯** to rename or delete one. Drafts,
+context restrictions, and pending requests stay with their conversation. A new
+conversation inherits the current context restrictions; its history starts empty.
+OpenAI Ask and Research and Anthropic Ask can show text while it is generated.
+For compatible endpoints, enable **Stream responses** if the provider supports
+it. Citations and Research save actions become available after the response
+finishes. Anthropic Research shows completed responses.
+Press Enter to add a line to a question, and Ctrl+Enter (⌘+Enter on macOS) to
+send it. While a request is running, you can draft the next question or use
+**Stop** to cancel the current request.
+
+**Ask** selects relevant Manuscript, Lore, and Research passages, including
+current open-editor text. Retrieval uses text matches, so it can miss relevant
+material that uses different words. It can also follow a small number of names
+from relevant identity statements; these are search hints, not established canon.
+When space permits, the assistant also receives immediately adjacent authored
+paragraphs. Those paragraphs can provide context but may describe different events.
+In Ask or Check, open **Project context**
+and select a document or group in Explorer to pin or exclude it. Pinned material
+is prioritized within the context limit; exclusions also apply to notes and take
+precedence over pins. In **Scope**, choose the selected item to restrict Ask to
+that document or group. For Check it restricts comparison evidence; the check
+target is also included. **Editor selection** captures the selected text at send time;
+Check also includes its target in that mode. Select up to 32 KiB of text before
+sending. To read notes, choose a document or project scope instead. Pins outside
+the limit have no effect, and a check cannot include an
+excluded target. While context is limited or an exclusion is set, earlier
+conversation turns are not sent to the provider, so they cannot reintroduce
+material outside that boundary. Context choices are retained locally
+for each mode and can be removed in the same control. Ask "Read my notes" for the
+current document, or "Read notes across the project" to include notes from other
+documents. Requests with ambiguous restrictions are retained for clarification.
+For other questions, enter the question, open **Project context**, and select
+**Current** or **Project** under **Notes · this question**. The selection
+applies to one request and respects context limits and exclusions. Editing the
+question, changing its context, or changing project structure clears or
+invalidates that selection. Selection-only context cannot include notes;
+**By request** restores the default behavior.
+After a colon, use a short question such as "what do they say about Marin?" or
+the scope "across the project"; other forms need clarification. A request can
+include up to 16 note messages, each limited to 1,200 characters;
+notes and other excerpts also share a 64 KiB context limit. ParchMint indicates
+when material is omitted, and tells the assistant its answer is not exhaustive.
+To create a note, select a passage and ask, for example, "Add a note here:
+check the tide". Note-derived answers are not sent as conversation history; ask
+to read notes again when a follow-up needs them. If the document
+changes before a requested note is created, the proposed note remains visible
+for review. Conversations, drafts, and proposed notes are stored locally in the
+application-data directory, separately from the project and its backups. Research
+import previews are retained there as well. An
+interrupted request is shown when you reopen the project and is not sent again
+automatically. Deleting a conversation removes its saved conversation, draft,
+and proposed notes. **Check** reviews the
+selected document or group against related project passages; it is not an
+exhaustive continuity guarantee. When the provider returns verifiable findings,
+expand a finding to inspect both quoted passages and open their sources. A
+provider response that cannot be validated remains visible as an unstructured
+check. Mark a finding **Intentional**, **Dismiss**, or **Resolved** to record
+your decision in the project. Decisions participate in project Undo and Redo.
+Changed evidence requires another check; matching a later finding to a decision
+is conservative and may require reviewing it again. Saving the first decision
+upgrades the project format, so older ParchMint versions cannot open it.
+For an open, unformatted paragraph in the checked material, **Propose edit**
+requests a replacement and shows it beside the original. **Apply** changes only
+that passage and can be undone as one editor change; **Discard** leaves it alone.
+The proposal is available only for the current editor session and is discarded
+when the project closes. A changed source or context requires a new check.
+**Context** reveals the excerpts
+sent with an answer or check, including passages the model did not cite. Source
+links open the cited document and, for newly retrieved authored passages, select
+the matching text when its revision is still current. Older citations and
+extracted original sources open the associated document. Changed evidence is
+marked and cannot be navigated as if it still matched. After following a source,
+**Back to writing** returns to the original tab and, when its editor session and
+revision still match, restores its selection and scroll position. If the writing
+changed in the meantime, ParchMint opens the current text without applying the
+old position.
+
+**Research** sends your query to a web-enabled provider without project
+excerpts. Review the answer and its sources before saving a summary, source links,
+or one original source to a Research group. A paused Anthropic search can make up
+to two additional requests to finish; each request may incur provider charges.
+An original downloads an unchanged public HTTPS PDF or text source up to
+64 MiB and stores it in the project. The assistant can search its UTF-8 plain
+text, Markdown, HTML, or XHTML content
+when the original is at most 8 MiB and its markup is within the extraction work limits.
+HTML is extracted as text without executing scripts or rendering styles, so it
+may differ from the page as displayed; inspect the original when a detail matters.
+For non-ASCII HTML, a UTF-8 declaration or byte-order mark is required; older
+saved sources may not retain their original HTTP charset. Conflicting or
+unsupported encodings and XHTML that requires DTD-defined entities cannot be
+extracted. PDF originals are saved but not yet searchable. The assistant reports
+when an original cannot be searched. Select its Research document and use
+**Save original** in the Research panel to save a copy elsewhere. Source-link
+saves retain links and access date without copying the source. If web search is
+unavailable, you can enter a source link manually. If an import was interrupted,
+check Research before continuing; changing the recovered preview starts a new
+import.
+
+For the supported priced OpenAI model, ParchMint estimates its own usage and
+reserves an amount before sending a request. Configure the local limit, warning,
+and UTC reset day under **Usage settings**. This estimate is not your account
+balance and does not include spending by other app instances, apps, or devices. Other models may
+have no available estimate or local dollar limit. Stopping a request cannot
+guarantee the provider will not charge for work already submitted.
 
 ## Search and replace
 
-Press the primary modifier plus **F** for Find in the focused pane. **Enter** and
+Press the primary modifier plus **F** for Find in the editor. **Enter** and
 **Shift+Enter** move between matches; **Escape** closes Find. The search button
 beside the breadcrumbs below the tabs also opens Find. Both local and global
 search focus their query box immediately; Escape dismisses either search.
@@ -271,7 +377,7 @@ menu transitions immediate. This setting is saved for all windows.
 
 Choose **Export** from the application menu, select an output HTML file, review title, page-break, and
 numbering options, then select **Export**. The result is one self-contained HTML
-file containing the whole Manuscript. Research, Synopsis, metadata, and notes
+file containing the whole Manuscript. Lore, Research, Synopsis, metadata, and notes
 are excluded. Use **Open** or **Reveal** after completion to inspect the file.
 
 ## Move or back up a project
@@ -309,9 +415,8 @@ standard field navigation remain available. The table below lists common default
 | Add or edit a link | Ctrl+K | Command+K |
 | Move between workspace regions | F6 | F6 |
 
-Additional configurable shortcuts include Ctrl/Cmd+Alt+Enter to open the selected
-document beside the editor, Ctrl/Cmd+Shift+\ to move a tab to the other pane,
-and Ctrl/Cmd+G / Ctrl/Cmd+Shift+G for the next/previous local search match.
+Additional configurable shortcuts include Ctrl/Cmd+G / Ctrl/Cmd+Shift+G for the
+next/previous local search match.
 Ctrl/Cmd+Alt+F opens Fields.
 
 Select manuscript text to add a comment or link from the small toolbar below it.

@@ -437,12 +437,9 @@ fn changed_drafts_remain_recoverable_without_exposing_an_unfiled_section() {
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
-        .unwrap();
-    harness
         .click_target(
             HarnessWindow::Project,
-            HarnessTarget::NewTab(EditorPane::Companion),
+            HarnessTarget::NewTab(EditorPane::Primary),
         )
         .unwrap();
     harness
@@ -451,7 +448,7 @@ fn changed_drafts_remain_recoverable_without_exposing_an_unfiled_section() {
     assert_ne!(
         primary,
         harness
-            .active_editor_document_id(EditorPane::Companion)
+            .active_editor_document_id(EditorPane::Primary)
             .unwrap()
     );
     assert!(
@@ -460,9 +457,6 @@ fn changed_drafts_remain_recoverable_without_exposing_an_unfiled_section() {
             .unwrap()
     );
     // Closing the workspace preserves both drafts without filing either one.
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
-        .unwrap();
     harness.close(HarnessWindow::Project).unwrap();
     harness.shutdown().unwrap();
     let bodies = canonical_bodies_in(&project.join("unfiled"));
@@ -628,7 +622,7 @@ fn creation_and_typing_survive_delayed_recovery_completions_in_either_order() {
 fn finishing_research_creation_by_clicking_the_editor_never_duplicates_input() {
     let run = IsolatedRun::new("research-pointer-routing").unwrap();
     let project = run.root().join("novel.parchmint");
-    let harness = create_project(&run, &project, "Independent panes");
+    let harness = create_project(&run, &project, "Independent documents");
     harness
         .type_into_target(
             HarnessWindow::Project,
@@ -642,15 +636,15 @@ fn finishing_research_creation_by_clicking_the_editor_never_duplicates_input() {
     harness
         .click_text(HarnessWindow::Project, "New document")
         .unwrap();
-    // The Research tab is opened by committing the name on blur. This click
-    // initially lands in the still-full-width manuscript editor.
+    // Committing the name on blur opens Research in the single editor; the
+    // pointer input must have exactly one owner during that transition.
     harness
         .type_at(HarnessWindow::Project, (760.0, 300.0), "One owner.")
         .unwrap();
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "Research only.",
         )
         .unwrap();
@@ -661,7 +655,7 @@ fn finishing_research_creation_by_clicking_the_editor_never_duplicates_input() {
     assert!(
         bodies
             .iter()
-            .any(|body| body.contains("<p>Manuscript must stay unchanged.One owner.</p>")),
+            .any(|body| body.contains("<p>Manuscript must stay unchanged.</p>")),
         "{bodies:?}"
     );
     assert_eq!(
@@ -742,7 +736,7 @@ fn toolbar_typing_marks_and_history_compare_the_live_unsaved_draft() {
 fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
     let run = IsolatedRun::new("manuscript-research-integrity").unwrap();
     let project = run.root().join("novel.parchmint");
-    let harness = create_project(&run, &project, "Research beside the novel");
+    let harness = create_project(&run, &project, "Research with the novel");
     let manuscript = harness
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();
@@ -758,17 +752,15 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
     harness
         .right_click_text(HarnessWindow::Project, "Mara's background")
         .unwrap();
-    harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Open").unwrap();
     let research = harness
-        .active_editor_document_id(EditorPane::Companion)
+        .active_editor_document_id(EditorPane::Primary)
         .unwrap();
     assert_ne!(manuscript, research);
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "Mara grew up inland and fears deep water.",
         )
         .unwrap();
@@ -783,10 +775,11 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
             .unwrap()
     );
     harness
-        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "harbor")
+        .right_click_text(HarnessWindow::Project, "Untitled Document")
         .unwrap();
+    harness.click_text(HarnessWindow::Project, "Open").unwrap();
     harness
-        .scroll_target_by(HarnessWindow::Project, HarnessTarget::EditorCompanion, 80.0)
+        .select_editor_text(HarnessWindow::Project, EditorPane::Primary, "harbor")
         .unwrap();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::Bold)
@@ -800,9 +793,6 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
             HarnessTarget::CommentDraft,
             "Check this against Mara's background.",
         )
-        .unwrap();
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
         .unwrap();
     harness
         .click_text(HarnessWindow::Project, "Add note")
@@ -887,18 +877,17 @@ fn manuscript_and_research_keep_independent_edits_comments_and_saved_history() {
             .unwrap(),
         manuscript
     );
-    assert_eq!(
+    assert!(
         reopened
-            .active_editor_document_id(EditorPane::Companion)
-            .unwrap(),
-        research
+            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Primary, research)
+            .unwrap()
     );
     reopened.close(HarnessWindow::Project).unwrap();
     reopened.shutdown().unwrap();
 }
 
 #[test]
-fn editor_can_research_and_revise_the_same_document_from_both_panes() {
+fn reopening_a_document_keeps_the_same_editor_and_its_edits() {
     let run = IsolatedRun::new("same-document-research").expect("isolated run");
     let project = run.root().join("same-document-research.parchmint");
     let harness = create_project(&run, &project, "Same Document Research");
@@ -926,25 +915,25 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
         .right_click_text(HarnessWindow::Project, "Tide Journal")
         .unwrap();
     harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .expect("open the same source beside the primary pane");
+        .click_text(HarnessWindow::Project, "Open")
+        .expect("reopen the same source in the editor");
     assert_eq!(
         document_id,
         harness
-            .active_editor_document_id(EditorPane::Companion)
-            .expect("read companion document identity")
+            .active_editor_document_id(EditorPane::Primary)
+            .expect("read reopened document identity")
     );
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             " The lantern stays lit.",
         )
-        .expect("append research detail through the companion pane");
+        .expect("append research detail");
     assert!(
         harness
             .active_editor_body()
-            .expect("read companion body")
+            .expect("read reopened body")
             .contains("lantern")
     );
 
@@ -954,11 +943,11 @@ fn editor_can_research_and_revise_the_same_document_from_both_panes() {
             HarnessTarget::EditorPrimary,
             " Verified by the log.",
         )
-        .expect("revise from the primary pane after a companion edit");
+        .expect("continue revising the document");
     assert!(
         harness
             .active_editor_body()
-            .expect("read primary body after focus transfer")
+            .expect("read revised body")
             .contains("Verified by the log")
     );
     harness
@@ -1151,13 +1140,10 @@ fn a_draft_keeps_typing_while_its_creation_completion_is_delayed() {
 }
 
 #[test]
-fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
+fn explorer_menus_dismiss_in_the_single_editor() {
     let run = IsolatedRun::new("pane-tab-transfers").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Pane transfers");
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleCompanion)
-        .unwrap();
     let initial = harness
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();
@@ -1180,27 +1166,16 @@ fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
             .unwrap()
     );
     harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
         .unwrap();
     assert!(
         !harness
             .contains_text(HarnessWindow::Project, "New group")
             .unwrap()
     );
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::ToggleExplorer)
-        .unwrap();
-    harness
-        .drag_text_to_text(HarnessWindow::Project, "Opening", "Untitled")
-        .unwrap();
-    assert!(
-        !harness
-            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Primary, opening.clone())
-            .unwrap()
-    );
     assert!(
         harness
-            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Companion, opening)
+            .editor_tab_is_visible(HarnessWindow::Project, EditorPane::Primary, opening)
             .unwrap()
     );
     assert!(
@@ -1211,7 +1186,10 @@ fn tabs_move_between_panes_and_explorer_menus_dismiss_in_the_editor() {
     );
     if let Some(root) = std::env::var_os("PARCHMINT_REVIEW_ARTIFACTS") {
         harness
-            .snapshot(HarnessWindow::Project, Path::new(&root).join("pane-tabs"))
+            .snapshot(
+                HarnessWindow::Project,
+                Path::new(&root).join("single-editor-tabs"),
+            )
             .unwrap();
         harness
             .resize(HarnessWindow::Project, 1280.0, 720.0)

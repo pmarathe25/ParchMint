@@ -75,6 +75,13 @@ pub enum HarnessTarget {
     PaneFocus(EditorPane),
     ToggleExplorer,
     ToggleInspector,
+    AssistantConversationPicker,
+    AssistantNewConversation,
+    AssistantConversationMenu,
+    AssistantConversationName,
+    AssistantScope,
+    AssistantDraft,
+    AssistantSubmit,
     CommentMenu(usize),
     NoteDelete(usize),
 }
@@ -153,6 +160,13 @@ impl HarnessTarget {
             Self::PaneFocus(EditorPane::Companion) => "harness.pane-focus.companion",
             Self::ToggleExplorer => "harness.toggle-explorer",
             Self::ToggleInspector => "harness.toggle-inspector",
+            Self::AssistantConversationPicker => "harness.assistant.conversation-picker",
+            Self::AssistantNewConversation => "harness.assistant.new-conversation",
+            Self::AssistantConversationMenu => "harness.assistant.conversation-menu",
+            Self::AssistantConversationName => "harness.assistant.conversation-name",
+            Self::AssistantScope => "harness.assistant.scope",
+            Self::AssistantDraft => "harness.assistant.draft",
+            Self::AssistantSubmit => "harness.assistant.submit",
             Self::NoteDelete(index) => return format!("harness.note.delete.{index}").into(),
             Self::CommentMenu(index) => return format!("harness.comment.menu.{index}").into(),
         })
@@ -180,6 +194,10 @@ where
     Message: 'a,
 {
     container(content).id(id).into()
+}
+
+pub(crate) fn assistant_send_guard_id() -> Id {
+    Id::new("parchmint.assistant.send")
 }
 
 pub(crate) fn explorer_row_id(node_id: &str) -> Id {

@@ -1,8 +1,7 @@
 use std::{collections::BTreeMap, fs, path::Path, time::Duration};
 
 use parchmint_desktop::{
-    DesktopInteractionHarness, EditorPane, HarnessTarget, HarnessWindow, LaunchRequest,
-    RibbonDestination,
+    DesktopInteractionHarness, HarnessTarget, HarnessWindow, LaunchRequest, RibbonDestination,
 };
 use parchmint_domain::{
     DocumentId, NodeId, Project, ProjectCommand, ProjectId, apply_project_command,
@@ -87,7 +86,7 @@ fn chapter_save_and_reopen_performance() {
 /// loading, and a full application restart. The virtual clock makes the long
 /// session deterministic without a wall-clock wait.
 #[test]
-fn large_manuscript_survives_sustained_two_pane_authoring_and_restart() {
+fn large_manuscript_survives_sustained_authoring_and_restart() {
     let run = IsolatedRun::new("large-document-sustained-authoring").expect("isolated run");
     let project = run
         .root()
@@ -101,13 +100,10 @@ fn large_manuscript_survives_sustained_two_pane_authoring_and_restart() {
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
         .expect("open large-document project");
     let _ = harness.take_diagnostics();
-    open_in_both_panes(&harness);
-    assert!(
-        harness
-            .editor_panes_share_session()
-            .expect("observe shared two-pane editor session"),
-        "two views of one manuscript must share a session before authoring"
-    );
+    harness
+        .right_click_text(HarnessWindow::Project, LARGE_DOCUMENT_TITLE)
+        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Open").unwrap();
 
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
@@ -130,14 +126,9 @@ fn large_manuscript_survives_sustained_two_pane_authoring_and_restart() {
             "session {session} marker must remain present after autosave"
         );
     }
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
-        .expect("focus companion view of the shared manuscript");
-    let companion_body = harness
-        .active_editor_body()
-        .expect("read companion large-manuscript view");
+    let current_body = harness.active_editor_body().expect("read large manuscript");
     for session in 1..=6 {
-        assert_eq!(companion_body.matches(&session.to_string()).count(), 1);
+        assert_eq!(current_body.matches(&session.to_string()).count(), 1);
     }
 
     harness
@@ -160,7 +151,7 @@ fn large_manuscript_survives_sustained_two_pane_authoring_and_restart() {
             HarnessTarget::Ribbon(RibbonDestination::Editor),
         )
         .expect("return to editor after History load");
-    assert_no_error_diagnostics(&harness, "sustained two-pane authoring");
+    assert_no_error_diagnostics(&harness, "sustained authoring");
     close(harness);
 
     let reopened = DesktopInteractionHarness::launch(run.root(), LaunchRequest::open(&project))
@@ -337,31 +328,6 @@ fn large_document_recovery_replays_repeated_unsaved_authoring_without_loss() {
     for capture in 1..=6 {
         assert_eq!(canonical[0].matches(&capture.to_string()).count(), 1);
     }
-}
-
-fn open_in_both_panes(harness: &DesktopInteractionHarness) {
-    harness
-        .right_click_text(HarnessWindow::Project, LARGE_DOCUMENT_TITLE)
-        .expect("open large-manuscript context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open")
-        .expect("open large manuscript in primary pane");
-    let document_id = harness
-        .active_editor_document_id(EditorPane::Primary)
-        .expect("read primary large-manuscript identity");
-    harness
-        .right_click_text(HarnessWindow::Project, LARGE_DOCUMENT_TITLE)
-        .expect("reopen large-manuscript context menu");
-    harness
-        .click_text(HarnessWindow::Project, "Open beside")
-        .expect("open large manuscript in companion pane");
-    assert_eq!(
-        harness
-            .active_editor_document_id(EditorPane::Companion)
-            .expect("read companion large-manuscript identity"),
-        document_id,
-        "both panes must bind the same large document"
-    );
 }
 
 fn seed_large_document_project(path: &Path, title: &str, body: &str) {

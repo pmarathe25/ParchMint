@@ -191,6 +191,33 @@ impl NativeProjectFileSystem {
     pub const fn new() -> Self {
         Self
     }
+
+    /// Reads at most `limit` bytes through the same checked project boundary.
+    pub fn read_bounded(
+        &self,
+        root: &ProjectRootCapability,
+        path: &CanonicalRelativePath,
+        limit: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        verify_lock_owner(root)?;
+        let checked = checked_target(root, path, false)?;
+        if checked.identity == FileIdentity::MISSING {
+            return Err(FsError::Missing { path: checked.path });
+        }
+        let file = File::open(&checked.path)
+            .map_err(|error| FsError::io("open canonical resource", &checked.path, error))?;
+        let mut bytes = Vec::new();
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|error| FsError::io("read canonical resource", &checked.path, error))?;
+        if bytes.len() as u64 > limit {
+            return Err(FsError::Corrupt {
+                path: checked.path,
+                reason: "resource exceeds its size limit".into(),
+            });
+        }
+        Ok(bytes)
+    }
 }
 
 impl ProjectFileSystem for NativeProjectFileSystem {
@@ -1783,7 +1810,7 @@ impl<F: ProjectFileSystem> FsProjectRepository<F> {
             .read(&root, &manifest_path)
             .map_err(|error| Self::map_repository_error(&path, error))?;
         let codec = ProjectFormatCodec::default();
-        codec
+        let version = codec
             .detect(&control)
             .map_err(|error| RepositoryError::Integrity {
                 path: path.clone(),
@@ -1795,6 +1822,19 @@ impl<F: ProjectFileSystem> FsProjectRepository<F> {
                 reason,
             }
         })?;
+        let parsed_manifest =
+            codec
+                .decode_manifest(&manifest_bytes)
+                .map_err(|error| RepositoryError::Integrity {
+                    path: path.clone(),
+                    reason: error.to_string(),
+                })?;
+        codec
+            .validate_manifest_version(version, &parsed_manifest)
+            .map_err(|error| RepositoryError::Integrity {
+                path: path.clone(),
+                reason: error.to_string(),
+            })?;
         let manifest =
             String::from_utf8(manifest_bytes).map_err(|error| RepositoryError::Integrity {
                 path: path.clone(),
@@ -1823,6 +1863,18 @@ impl<F: ProjectFileSystem> ProjectRepository for FsProjectRepository<F> {
                 reason,
             }
         })?;
+        let manifest = codec
+            .decode_manifest(request.manifest.as_bytes())
+            .map_err(|error| RepositoryError::Integrity {
+                path: request.path.clone(),
+                reason: error.to_string(),
+            })?;
+        codec
+            .validate_manifest_version(parchmint_project_format::FormatVersion::V1, &manifest)
+            .map_err(|error| RepositoryError::Integrity {
+                path: request.path.clone(),
+                reason: error.to_string(),
+            })?;
         let mut writes = vec![
             (
                 CanonicalRelativePath::parse(CONTROL_PATH).expect("static path"),

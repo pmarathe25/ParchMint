@@ -247,6 +247,32 @@ fn checkpoint_intents_persist_require_commit_and_complete_idempotently() {
 }
 
 #[test]
+fn checkpoint_intent_retains_opaque_original_identity_and_bytes_after_reopen() {
+    let dir = TestDir::new("original-intent");
+    let journal = open(&dir);
+    let source_id = "0123456789abcdef0123456789abcdef";
+    let path = format!("research/originals/{source_id}.bin");
+    let original = b"source\r\n\0\xff".to_vec();
+    let mut pending = intent(42);
+    pending.revisions.canonical_hashes.insert(
+        ResourceId::ResearchOriginal {
+            source_id: source_id.to_owned(),
+        },
+        ContentHash::of_bytes(&original),
+    );
+    pending.writes.writes.push(StagedResource {
+        path: path.clone(),
+        bytes: original.clone(),
+    });
+    pending.checkpoint.resources.insert(
+        CanonicalRelativePath::parse(path).unwrap(),
+        ContentHash::of_bytes(&original),
+    );
+    journal.persist(pending.clone()).unwrap();
+    assert_eq!(open(&dir).pending().unwrap(), vec![pending]);
+}
+
+#[test]
 fn compaction_removes_only_saved_records_and_retains_newer_edits() {
     let dir = TestDir::new("compaction");
     let journal = open(&dir);

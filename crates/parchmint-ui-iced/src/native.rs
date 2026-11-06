@@ -2,7 +2,7 @@
 
 #[cfg(feature = "interaction-harness")]
 mod interaction_harness;
-mod worker_pool;
+pub(crate) mod worker_pool;
 
 #[cfg(feature = "interaction-harness")]
 pub use interaction_harness::*;
@@ -486,6 +486,18 @@ pub trait NativeDesktopCallbacks: Send + Sync {
     fn keybindings(&self) -> parchmint_preferences::Keybindings {
         Default::default()
     }
+    fn assistant_preferences(&self) -> parchmint_preferences::AssistantPreferences {
+        Default::default()
+    }
+    fn configure_assistant(
+        &self,
+        _profile: parchmint_preferences::AssistantPreferences,
+        _key: crate::AssistantSecretDraft,
+        _session_only: bool,
+        _remove_key: bool,
+    ) -> Result<parchmint_preferences::AssistantPreferences, String> {
+        Err("AI assistant settings are unavailable".into())
+    }
     fn set_keybindings(&self, _bindings: parchmint_preferences::Keybindings) -> Result<(), String> {
         Err("Shortcut settings are unavailable".into())
     }
@@ -676,6 +688,14 @@ enum Message {
     WindowOpened(window::Id),
     CaptureFrameTick(window::Id),
     CaptureWake,
+    AssistantHistoryTick,
+    AssistantProgressTick,
+    ResearchOriginalSaved {
+        window: window::Id,
+        capability: WindowCapability,
+        session: parchmint_ui_api::ProjectSessionCapability,
+        result: Result<bool, String>,
+    },
     CaptureScreenshot(window::Screenshot),
     CaptureEncoded(Result<NativeCapturePng, String>),
     RuntimeEvent {
@@ -695,7 +715,13 @@ enum Message {
         document: String,
         view: ViewId,
         mount_generation: u64,
-        text: String,
+        attempt: u64,
+    },
+    ContinueAssistantNavigation {
+        window: window::Id,
+        session: parchmint_ui_api::ProjectSessionCapability,
+        document: String,
+        interaction_generation: u64,
     },
     WorkspaceLoaded {
         window: window::Id,
@@ -733,6 +759,22 @@ enum Message {
     },
     OpenRecentProject(PathBuf),
     PreferencesChanged(parchmint_preferences::ApplicationPreferences),
+    AssistantSettingsFinished {
+        window: window::Id,
+        session: ProjectSessionCapability,
+        edit_generation: u64,
+        removing_key: bool,
+        result: Result<parchmint_preferences::AssistantPreferences, String>,
+    },
+    AssistantFinished {
+        window: window::Id,
+        capability: WindowCapability,
+        session: ProjectSessionCapability,
+        tab: crate::AssistantDockTab,
+        conversation_id: String,
+        request_id: u64,
+        result: Result<parchmint_ui_api::AssistantWorkflowResult, String>,
+    },
     ZoomFinished {
         value: u16,
         result: Result<(), String>,
@@ -791,6 +833,7 @@ enum Message {
     ProjectEffectFinished {
         window: window::Id,
         mutation: Option<ProjectMutationTicket>,
+        opening_document: Option<(String, u64)>,
         result: Result<ProjectEffectCompletion, ProjectRuntimeError>,
     },
     HistoryWorkflowFinished {
@@ -804,6 +847,7 @@ enum Message {
         window: window::Id,
         mutation: Option<OpaqueMutationToken>,
         target: Option<(EditorPane, u64)>,
+        draft_mount: Option<(String, u64)>,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     },
     SpellcheckFinished {
@@ -1173,6 +1217,7 @@ impl std::ops::Deref for DesktopStatus {
 }
 
 pub(crate) struct NativeDesktop {
+    assistant_preferences: parchmint_preferences::AssistantPreferences,
     ui_zoom_percent: u16,
     keybindings: parchmint_preferences::Keybindings,
     keybindings_busy: bool,
@@ -1257,6 +1302,12 @@ enum NativeWindow {
     Project(Box<NativeProjectState>),
 }
 
+struct PendingAssistantNavigation {
+    source: Box<parchmint_assistant_api::ContextPassage>,
+    draft: String,
+    interaction_generation: u64,
+}
+
 struct NativeProjectState {
     project: NativeProjectWindow,
     shell: Shell,
@@ -1268,6 +1319,11 @@ struct NativeProjectState {
     /// tab must never replace edits which have not reached project persistence
     /// with the stale document snapshot carried by a mount effect.
     retained_editor_sessions: BTreeMap<parchmint_domain::DocumentId, SharedEditorSession>,
+    /// Changes when the author supersedes a pending assistant navigation.
+    assistant_interaction_generation: u64,
+    pending_assistant_navigation: Option<PendingAssistantNavigation>,
+    draft_initialization_succeeded: bool,
+    draft_initialization_committed: bool,
     /// A created Explorer row must first be rendered before Iced can focus its
     /// inline text field. The surface consumes this one-shot request on show.
     pending_hierarchy_rename_focus: Option<String>,
@@ -1373,6 +1429,8 @@ struct WorkspaceNotification {
     message: String,
     kind: NotificationKind,
     expires_at: Option<Instant>,
+    requires_acknowledgement: bool,
+    action_key: Option<String>,
 }
 
 impl WorkspaceNotification {
@@ -1382,6 +1440,8 @@ impl WorkspaceNotification {
             message: message.into(),
             kind: NotificationKind::Information,
             expires_at: Some(Instant::now() + Duration::from_secs(5)),
+            requires_acknowledgement: false,
+            action_key: None,
         }
     }
 
@@ -1391,6 +1451,16 @@ impl WorkspaceNotification {
             message: message.into(),
             kind: NotificationKind::Error,
             expires_at: Some(Instant::now() + Duration::from_secs(5)),
+            requires_acknowledgement: false,
+            action_key: None,
+        }
+    }
+
+    fn action_required(key: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            requires_acknowledgement: true,
+            action_key: Some(key.into()),
+            ..Self::error(message)
         }
     }
 }
@@ -1405,11 +1475,86 @@ fn append_workspace_notification(
     notification: WorkspaceNotification,
 ) {
     const MAX_NOTIFICATIONS: usize = 50;
-    notifications.push(notification);
-    let excess = notifications.len().saturating_sub(MAX_NOTIFICATIONS);
-    if excess > 0 {
-        notifications.drain(..excess);
+    if notification.requires_acknowledgement
+        && let Some(index) = notifications.iter().position(|entry| {
+            entry.requires_acknowledgement && entry.action_key == notification.action_key
+        })
+    {
+        notifications.remove(index);
     }
+    notifications.push(notification);
+    while notifications.len() > MAX_NOTIFICATIONS {
+        let Some(index) = notifications
+            .iter()
+            .position(|entry| !entry.requires_acknowledgement)
+        else {
+            break;
+        };
+        notifications.remove(index);
+    }
+}
+
+fn draft_transfer_key(document: &str, text: &str) -> String {
+    format!(
+        "draft-transfer:{document}:{:?}",
+        parchmint_project_format::ContentHash::of_bytes(text.as_bytes())
+    )
+}
+
+fn draft_title(state: &NativeProjectState, document: &str) -> String {
+    state
+        .workspace
+        .as_ref()
+        .and_then(|workspace| {
+            [EditorPane::Primary, EditorPane::Companion]
+                .into_iter()
+                .find_map(|pane| {
+                    workspace
+                        .editor()
+                        .pane(pane)
+                        .tabs()
+                        .iter()
+                        .find(|tab| tab.id() == document)
+                        .map(|tab| tab.title().to_owned())
+                })
+        })
+        .unwrap_or_else(|| "Draft".to_owned())
+}
+
+fn fail_draft_transfer(
+    state: &mut NativeProjectState,
+    document: &str,
+    attempt: u64,
+    loading: bool,
+) {
+    let Some(workspace) = state.workspace.as_mut() else {
+        return;
+    };
+    if workspace.editor().draft_transfer_attempt(document) != Some(attempt)
+        || (loading && !workspace.editor().initial_prose_pending(document))
+    {
+        return;
+    }
+    let Some(text) = workspace
+        .editor()
+        .scratch(document)
+        .map(|content| content.text())
+    else {
+        return;
+    };
+    workspace.editor_mut().fail_draft_transfer(document);
+    workspace.take_promoted_close(document);
+    state.pending_assistant_navigation = None;
+    state.autosave.close_after_save = false;
+    let title = draft_title(state, document);
+    append_workspace_notification(
+        &mut state.notifications,
+        WorkspaceNotification::action_required(
+            draft_transfer_key(document, &text),
+            format!("{title}: Couldn't save draft. Copy its text before discarding it."),
+        ),
+    );
+    state.notification_drawer_open = true;
 }
 
 fn expire_workspace_notifications(notifications: &mut Vec<WorkspaceNotification>, now: Instant) {
@@ -1439,6 +1584,7 @@ fn dismiss_workspace_notification(
 
 fn project_effect_notification(effect: &ProjectEffect) -> Option<&'static str> {
     match effect {
+        ProjectEffect::ImportResearch { .. } => Some("Saved research"),
         ProjectEffect::DeleteHierarchy(_) => Some("Moved item to Recently Deleted"),
         ProjectEffect::DiscardDraft(_) => Some("Discarded draft"),
         ProjectEffect::PasteCopiedSubtrees { .. } => Some("Copied item"),
@@ -2140,7 +2286,9 @@ fn current_document_load(
 fn project_effect_requires_durability(effect: &ProjectEffect) -> bool {
     matches!(
         effect,
-        ProjectEffect::CreateHierarchy { .. }
+        ProjectEffect::SetContinuityDecision { .. }
+            | ProjectEffect::ImportResearch { .. }
+            | ProjectEffect::CreateHierarchy { .. }
             | ProjectEffect::CreateDraft { .. }
             | ProjectEffect::FileDraft { .. }
             | ProjectEffect::DeleteHierarchy(_)
@@ -2258,6 +2406,7 @@ impl NativeDesktop {
             });
         }
         let mut desktop = Self {
+            assistant_preferences: callbacks.assistant_preferences(),
             ui_zoom_percent: callbacks.ui_zoom_percent().clamp(75, 150),
             keybindings: callbacks.keybindings(),
             keybindings_busy: false,
@@ -2357,6 +2506,22 @@ impl NativeDesktop {
             workspace.apply_ui_zoom(self.ui_zoom_percent);
             workspace.shortcut_settings_mut().keybindings = self.keybindings.clone();
             workspace.shortcut_settings_mut().shortcuts_busy = self.keybindings_busy;
+            let assistant = workspace.assistant_settings_mut();
+            assistant.saved_profile = self.assistant_preferences.clone();
+            if !assistant.dirty && !assistant.busy {
+                assistant.profile = self.assistant_preferences.clone();
+                assistant.budget_draft = format!(
+                    "{}.{:02}",
+                    self.assistant_preferences.monthly_budget_cents / 100,
+                    self.assistant_preferences.monthly_budget_cents % 100
+                );
+                assistant.warning_draft = format!(
+                    "{}.{:02}",
+                    self.assistant_preferences.warning_cents / 100,
+                    self.assistant_preferences.warning_cents % 100
+                );
+                assistant.reset_draft = self.assistant_preferences.reset_day.to_string();
+            }
             // Sessions own per-document focus, but keyboard input has one
             // owner across documents. A newly mounted Research pane must not
             // leave the previous document's retained Canvas accepting keys.
@@ -2540,15 +2705,93 @@ impl NativeDesktop {
                 document,
                 view,
                 mount_generation,
-                text,
+                attempt,
             } => {
-                let formats = if let Some(NativeWindow::Project(state)) =
+                // The scratch editor can receive input after the mount was
+                // scheduled. Transfer its latest contents, not the older copy.
+                let Some(text) = (match self.windows.get(&window) {
+                    Some(NativeWindow::Project(state)) => state
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.editor().scratch(&document))
+                        .map(|content| content.text()),
+                    _ => None,
+                }) else {
+                    return Task::none();
+                };
+                if !matches!(self.windows.get(&window), Some(NativeWindow::Project(state))
+                    if state.workspace.as_ref().is_some_and(|workspace|
+                        workspace.editor().draft_transfer_attempt(&document) == Some(attempt)))
+                {
+                    return Task::none();
+                }
+                let has_text = !text.is_empty();
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    state.draft_initialization_succeeded = false;
+                    state.draft_initialization_committed = false;
+                }
+                let valid_mount = matches!(self.windows.get(&window),
+                    Some(NativeWindow::Project(state)) if state.workspace.as_ref().is_some_and(|workspace| {
+                        let current = workspace.editor().pane(pane);
+                        current.active_document() == Some(document.as_str())
+                            && current.view() == view
+                            && current.mount_generation() == mount_generation
+                            && workspace.editor().scratch(&document).is_some()
+                            && workspace.editor().scratch_is_pending(&document)
+                    }) && state.mounted_documents.get(&pane).is_some_and(|id|
+                        stable_id_string(id.as_bytes()) == document)
+                        && state.editor_bindings.get(&pane).is_some_and(|binding| binding.view() == view)
+                );
+                if !valid_mount {
+                    let retry = if let Some(NativeWindow::Project(state)) =
+                        self.windows.get_mut(&window)
+                    {
+                        state.pending_assistant_navigation = None;
+                        state.autosave.close_after_save = false;
+                        state
+                            .workspace
+                            .as_mut()
+                            .and_then(|workspace| {
+                                workspace.take_promoted_close(&document);
+                                workspace.editor_mut().rearm_initial_prose(&document);
+                                let current = workspace.editor().pane(pane);
+                                (current.active_document() == Some(document.as_str())).then(|| {
+                                    EditorEffect::MountDocument {
+                                        pane,
+                                        view: current.view(),
+                                        document_id: document.clone(),
+                                    }
+                                })
+                            })
+                            .map(|effect| Self::editor_effect_tasks(window, state, vec![effect]))
+                            .unwrap_or_else(Task::none)
+                    } else {
+                        Task::none()
+                    };
+                    self.closing_windows.remove(&window);
+                    return retry;
+                }
+                let mut skipped_break = false;
+                let (formats, formats_succeeded) = if let Some(NativeWindow::Project(state)) =
                     self.windows.get_mut(&window)
                     && let Some(workspace) = state.workspace.as_mut()
+                    && valid_mount
                 {
-                    workspace.editor_mut().finish_initial_prose(&document);
                     let mut effects = Vec::new();
                     for command in workspace.editor_mut().take_scratch_formats(&document) {
+                        // The plain scratch buffer does not retain the break's
+                        // position among later edits. Keep the prose intact
+                        // rather than guessing where to put the break.
+                        if has_text
+                            && matches!(
+                                command,
+                                crate::FormattingCommand::SceneBreak
+                                    | crate::FormattingCommand::PageBreak
+                            )
+                        {
+                            skipped_break = true;
+                            continue;
+                        }
                         if let Some(command) = command.editor_command() {
                             effects.push(EditorEffect::Command { view, command });
                         } else if workspace.editor().focused_pane() == pane
@@ -2563,14 +2806,19 @@ impl NativeDesktop {
                             );
                         }
                     }
-                    Self::editor_effect_tasks(window, state, effects)
+                    Self::editor_effect_tasks_checked(
+                        window,
+                        state,
+                        effects,
+                        Some((view, &document)),
+                    )
                 } else {
-                    Task::none()
+                    (Task::none(), false)
                 };
-                let input = if text.is_empty() {
+                let input = if text.is_empty() || !valid_mount {
                     Task::none()
                 } else {
-                    self.update_project_surface(
+                    self.update_project_surface_with_origin(
                         window,
                         ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Mounted {
                             pane,
@@ -2578,8 +2826,36 @@ impl NativeDesktop {
                             mount_generation,
                             message: parchmint_editor_iced::MountedEditorMessage::InsertText(text),
                         }),
+                        true,
                     )
                 };
+                let input_succeeded = if !valid_mount {
+                    false
+                } else if has_text {
+                    match self.windows.get_mut(&window) {
+                        Some(NativeWindow::Project(state)) => state.draft_initialization_succeeded,
+                        _ => false,
+                    }
+                } else {
+                    true
+                };
+                let input_committed = valid_mount
+                    && (!has_text
+                        || matches!(
+                            self.windows.get(&window),
+                            Some(NativeWindow::Project(state)) if state.draft_initialization_committed
+                        ));
+                if input_committed
+                    && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    workspace.editor_mut().finish_initial_prose(&document);
+                    state.notifications.retain(|notice| {
+                        !notice.action_key.as_deref().is_some_and(|key| {
+                            key.starts_with(&format!("draft-transfer:{document}:"))
+                        })
+                    });
+                }
                 let (close_tab, close_window) = match self.windows.get_mut(&window) {
                     Some(NativeWindow::Project(state)) => (
                         state
@@ -2590,7 +2866,63 @@ impl NativeDesktop {
                     ),
                     _ => (None, false),
                 };
-                let close = if close_window {
+                let closing = close_window || close_tab.is_some();
+                if skipped_break || !formats_succeeded || !input_succeeded {
+                    if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                        state.autosave.close_after_save = false;
+                        if input_succeeded && formats_succeeded {
+                            let title = state
+                                .workspace
+                                .as_ref()
+                                .and_then(|workspace| {
+                                    workspace
+                                        .editor()
+                                        .pane(pane)
+                                        .tabs()
+                                        .iter()
+                                        .find(|tab| tab.id() == document)
+                                        .map(|tab| tab.title().to_owned())
+                                })
+                                .unwrap_or_else(|| "Draft".to_owned());
+                            append_workspace_notification(
+                                &mut state.notifications,
+                                WorkspaceNotification::action_required(
+                                    format!("unplaced-breaks:{document}"),
+                                    format!(
+                                        "{title}: Breaks weren't added. Add them in the editor."
+                                    ),
+                                ),
+                            );
+                        }
+                        if !input_committed {
+                            fail_draft_transfer(state, &document, attempt, false);
+                        } else if !formats_succeeded {
+                            append_workspace_notification(
+                                &mut state.notifications,
+                                WorkspaceNotification::action_required(
+                                    format!("unapplied-format:{document}"),
+                                    "Some draft formatting wasn't applied. Check the document."
+                                        .to_owned(),
+                                ),
+                            );
+                        }
+                    }
+                    self.closing_windows.remove(&window);
+                }
+                if (skipped_break || !formats_succeeded || !input_succeeded)
+                    && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                {
+                    state.pending_assistant_navigation = None;
+                    if let Some(workspace) = state.workspace.as_mut()
+                        && matches!(workspace.assistant_return(),
+                            Some(crate::project_workspace::AssistantReturnLocation::Scratch { tab_id }) if tab_id == &document)
+                    {
+                        workspace.clear_assistant_return();
+                    }
+                }
+                let close = if skipped_break || !formats_succeeded || !input_succeeded {
+                    Task::none()
+                } else if close_window {
                     self.continue_close_window(window)
                 } else if let Some((pane, document_id)) = close_tab {
                     self.update_project_surface(
@@ -2602,7 +2934,82 @@ impl NativeDesktop {
                 } else {
                     Task::none()
                 };
-                Task::batch([formats, input, close])
+                let continuation = match self.windows.get(&window) {
+                    Some(NativeWindow::Project(state))
+                        if !closing && !skipped_break && formats_succeeded && input_succeeded =>
+                    {
+                        state
+                            .pending_assistant_navigation
+                            .as_ref()
+                            .filter(|pending| pending.draft == document)
+                            .map(|pending| {
+                                Task::done(Message::ContinueAssistantNavigation {
+                                    window,
+                                    session: state.project.session,
+                                    document,
+                                    interaction_generation: pending.interaction_generation,
+                                })
+                            })
+                            .unwrap_or_else(Task::none)
+                    }
+                    _ => Task::none(),
+                };
+                Task::batch([formats, input, close, continuation])
+            }
+            Message::ContinueAssistantNavigation {
+                window,
+                session,
+                document,
+                interaction_generation,
+            } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                    return Task::none();
+                };
+                if state.project.session != session
+                    || !state
+                        .pending_assistant_navigation
+                        .as_ref()
+                        .is_some_and(|pending| {
+                            pending.draft == document
+                                && pending.interaction_generation == interaction_generation
+                        })
+                {
+                    return Task::none();
+                }
+                let Some(pending) = state.pending_assistant_navigation.take() else {
+                    return Task::none();
+                };
+                if pending.interaction_generation != state.assistant_interaction_generation
+                    || !state.workspace.as_ref().is_some_and(|workspace| {
+                        workspace
+                            .editor()
+                            .pane(EditorPane::Primary)
+                            .active_document()
+                            == Some(document.as_str())
+                            && !workspace.editor().scratch_is_pending(&document)
+                            && workspace.assistant_source_is_current(&pending.source)
+                    })
+                {
+                    return Task::none();
+                }
+                let Some(location) = Self::capture_assistant_return(state) else {
+                    return Task::none();
+                };
+                if !matches!(
+                    location,
+                    crate::project_workspace::AssistantReturnLocation::Document { .. }
+                ) {
+                    return Task::none();
+                }
+                if let Some(workspace) = state.workspace.as_mut() {
+                    workspace.upgrade_assistant_scratch_return(location);
+                }
+                self.update_project_surface(
+                    window,
+                    ProjectSurfaceMessage::Project(ProjectMessage::OpenAssistantPassage(
+                        pending.source,
+                    )),
+                )
             }
             Message::WorkspaceLoaded { window, result } => {
                 if let Some(capture) = self
@@ -2647,7 +3054,12 @@ impl NativeDesktop {
                         Vec::new()
                     }
                 };
-                Self::project_effect_tasks(window, state.effect_executor.clone(), effects)
+                Self::project_effect_tasks(
+                    window,
+                    state.effect_executor.clone(),
+                    effects,
+                    state.workspace.as_deref(),
+                )
             }
             Message::WorkspacePersisted { result } => {
                 if let Err(error) = result {
@@ -2665,8 +3077,13 @@ impl NativeDesktop {
             }
             Message::ClearNotifications { window } => {
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
-                    state.notifications.clear();
-                    state.notification_drawer_open = false;
+                    state.notifications.retain(|notification| {
+                        notification
+                            .action_key
+                            .as_deref()
+                            .is_some_and(|key| key.starts_with("draft-transfer:"))
+                    });
+                    state.notification_drawer_open = !state.notifications.is_empty();
                 }
                 Task::none()
             }
@@ -2675,6 +3092,68 @@ impl NativeDesktop {
                 notification_id,
             } => {
                 if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) {
+                    let key = state
+                        .notifications
+                        .iter()
+                        .find(|notice| notice.id == notification_id)
+                        .and_then(|notice| notice.action_key.clone());
+                    let draft = key
+                        .as_deref()
+                        .and_then(|key| key.strip_prefix("draft-transfer:"))
+                        .and_then(|rest| rest.split_once(':'))
+                        .map(|(document, _)| document.to_owned());
+                    let title = draft
+                        .as_deref()
+                        .map(|document| draft_title(state, document));
+                    if let Some(document) = draft.as_deref()
+                        && state.workspace.as_ref().is_some_and(|workspace| {
+                            ![EditorPane::Primary, EditorPane::Companion]
+                                .into_iter()
+                                .any(|pane| {
+                                    workspace.editor().pane(pane).active_document()
+                                        == Some(document)
+                                })
+                        })
+                    {
+                        if let Some(notice) = state
+                            .notifications
+                            .iter_mut()
+                            .find(|notice| notice.id == notification_id)
+                        {
+                            notice.message = format!(
+                                "{}: Open this draft and copy its text before discarding it.",
+                                title.as_deref().unwrap_or("Draft")
+                            );
+                        }
+                        return Task::none();
+                    }
+                    if let Some((document, _)) = key
+                        .as_deref()
+                        .and_then(|key| key.strip_prefix("draft-transfer:"))
+                        .and_then(|rest| rest.split_once(':'))
+                        && let Some(workspace) = state.workspace.as_mut()
+                        && let Some(content) = workspace.editor().scratch(document)
+                    {
+                        let current_key = draft_transfer_key(document, &content.text());
+                        if key.as_deref() != Some(current_key.as_str()) {
+                            dismiss_workspace_notification(
+                                &mut state.notifications,
+                                notification_id,
+                            );
+                            append_workspace_notification(
+                                &mut state.notifications,
+                                WorkspaceNotification::action_required(
+                                    current_key,
+                                    format!(
+                                        "{}: The draft changed. Copy its text before discarding it.",
+                                        title.as_deref().unwrap_or("Draft")
+                                    ),
+                                ),
+                            );
+                            return Task::none();
+                        }
+                        workspace.editor_mut().finish_initial_prose(document);
+                    }
                     dismiss_workspace_notification(&mut state.notifications, notification_id);
                     if state.notifications.is_empty() {
                         state.notification_drawer_open = false;
@@ -2789,10 +3268,210 @@ impl NativeDesktop {
             }
             Message::PreferencesChanged(values) => {
                 self.keybindings = values.keybindings.clone();
+                self.assistant_preferences = self.callbacks.assistant_preferences();
                 self.apply_ui_zoom(values.ui_zoom_percent);
                 crate::motion::set_reduced(values.reduced_motion);
                 self.launcher
                     .set_recent_projects(launcher_recent_projects(values.recent_projects));
+                Task::none()
+            }
+            Message::AssistantSettingsFinished {
+                window,
+                session,
+                edit_generation,
+                removing_key,
+                result,
+            } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                    return Task::none();
+                };
+                if state.project.session != session {
+                    return Task::none();
+                }
+                let Some(workspace) = state.workspace.as_mut() else {
+                    return Task::none();
+                };
+                let settings = workspace.assistant_settings_mut();
+                settings.busy = false;
+                match result {
+                    Ok(profile) => {
+                        settings.saved_profile = profile.clone();
+                        if !removing_key && settings.edit_generation == edit_generation {
+                            settings.profile = profile.clone();
+                            settings.key = Default::default();
+                            settings.dirty = false;
+                        }
+                        settings.error = None;
+                        self.assistant_preferences = profile;
+                    }
+                    Err(error) => settings.error = Some(error),
+                }
+                Task::none()
+            }
+            Message::AssistantFinished {
+                window,
+                capability,
+                session,
+                tab,
+                conversation_id,
+                request_id,
+                result,
+            } => {
+                let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
+                    return Task::none();
+                };
+                if state.project.window != capability || state.project.session != session {
+                    return Task::none();
+                }
+                Self::sync_live_editor_revisions(state);
+                let pending = {
+                    let Some(workspace) = state.workspace.as_mut() else {
+                        return Task::none();
+                    };
+                    let Some(thread) = workspace.assistant_thread_by_id_mut(tab, &conversation_id)
+                    else {
+                        return Task::none();
+                    };
+                    if !thread
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.id == request_id)
+                    {
+                        return Task::none();
+                    }
+                    thread.progress = Default::default();
+                    thread.pending.take().expect("matching request is pending")
+                };
+                if let Some(origin) = pending.edit_origin {
+                    let current = state.workspace.as_ref().is_some_and(|workspace| {
+                        workspace.check_edit_is_current(&conversation_id, &origin)
+                    });
+                    let warning = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|result| result.usage_warning.clone());
+                    let proposal = result.and_then(|mut result| {
+                        let target = result
+                            .edit_proposal_target
+                            .take()
+                            .ok_or_else(|| "The proposed edit was invalid.".to_owned())?;
+                        let source = origin
+                            .finding_snapshot
+                            .evidence
+                            .get(origin.evidence)
+                            .ok_or_else(|| "The proposed edit was invalid.".to_owned())?;
+                        let expected_id = stable_id_bytes(&source.document_id)
+                            .map_err(|_| "The proposed edit was invalid.".to_owned())?;
+                        if !current
+                            || target.document.as_bytes() != &expected_id
+                            || target.revision != source.document_revision
+                            || target.original != source.text
+                            || source.anchor.as_deref()
+                                != Some(format!("text:{}:{}", target.start, target.end).as_str())
+                            || !result.response.tool_calls.is_empty()
+                        {
+                            return Err(
+                                "The source or project context changed. Run the check again."
+                                    .to_owned(),
+                            );
+                        }
+                        parchmint_assistant_core::edit_proposal::validate_replacement(
+                            &result.response.text,
+                            &target.original,
+                        )
+                        .map_err(|_| "The proposed edit was invalid.".to_owned())?;
+                        Ok(crate::project_workspace::AssistantEditProposal {
+                            origin,
+                            target,
+                            replacement: result.response.text,
+                            usage_warning: result.usage_warning,
+                            estimated_cost_micros: result.estimated_cost_micros,
+                            estimated_period_total_micros: result.estimated_period_total_micros,
+                        })
+                    });
+                    if let Some(thread) = state.workspace.as_mut().and_then(|workspace| {
+                        workspace.assistant_thread_by_id_mut(tab, &conversation_id)
+                    }) {
+                        match proposal {
+                            Ok(proposal) => {
+                                thread.edit_proposal = Some(proposal);
+                                thread.error = None;
+                            }
+                            Err(error) => {
+                                thread.error = Some(match warning {
+                                    Some(warning) => format!("{error} {warning}"),
+                                    None => error,
+                                })
+                            }
+                        }
+                    }
+                    return Task::none();
+                }
+                let mut proposal = None;
+                let result = result.and_then(|mut result| {
+                    if let Some(origin) = pending.note_origin.as_ref() {
+                        let calls = &result.response.tool_calls;
+                        let Some(call) = (calls.len() == 1).then(|| &calls[0]) else {
+                            return Err(
+                                "The assistant did not prepare a note. Your request is retained."
+                                    .into(),
+                            );
+                        };
+                        let Some(arguments) = call.arguments.as_object() else {
+                            return Err("The proposed note was invalid.".into());
+                        };
+                        let Some(body) = (call.name == "create_note" && arguments.len() == 1)
+                            .then(|| arguments.get("body").and_then(|value| value.as_str()))
+                            .flatten()
+                            .map(str::trim)
+                            .filter(|body| !body.is_empty() && body.chars().count() <= 4096)
+                        else {
+                            return Err("The proposed note was invalid.".into());
+                        };
+                        proposal = Some(body.to_owned());
+                        Self::create_assistant_note(state, origin, body)?;
+                        proposal = None;
+                        result.response.text = "Note added.".to_owned();
+                        result.response.tool_calls.clear();
+                    } else if !result.response.tool_calls.is_empty() {
+                        return Err("The assistant requested an unauthorized action.".into());
+                    }
+                    Ok(result)
+                });
+                let Some(thread) = state
+                    .workspace
+                    .as_mut()
+                    .expect("workspace remains open")
+                    .assistant_thread_by_id_mut(tab, &conversation_id)
+                else {
+                    return Task::none();
+                };
+                thread.note_proposal = proposal;
+                match result {
+                    Ok(result) => {
+                        if thread.draft == pending.prompt {
+                            thread.clear_draft();
+                        }
+                        thread
+                            .interrupted_prompts
+                            .retain(|prompt| prompt != &pending.prompt);
+                        thread.turns.push(crate::project_workspace::AssistantTurn {
+                            question: pending.prompt,
+                            result,
+                        });
+                        thread.error = None;
+                    }
+                    Err(error) => {
+                        if !thread.interrupted_prompts.contains(&pending.prompt) {
+                            thread.interrupted_prompts.push(pending.prompt);
+                        }
+                        thread.error = Some(error);
+                    }
+                }
+                let error = Self::queue_assistant_conversation(state).err();
+                if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                    workspace.set_assistant_history_error(Some(error));
+                }
                 Task::none()
             }
             Message::ZoomFinished { value, result } => {
@@ -3016,6 +3695,66 @@ impl NativeDesktop {
                 result,
             } => self.finish_clipboard_read(window, request, result),
             Message::AutosaveTick(now) => self.autosave_tick(now),
+            Message::ResearchOriginalSaved {
+                window,
+                capability,
+                session,
+                result,
+            } => {
+                if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                    && state.project.window == capability
+                    && state.project.session == session
+                {
+                    match result {
+                        Ok(true) => append_workspace_notification(
+                            &mut state.notifications,
+                            WorkspaceNotification::information("Original source saved"),
+                        ),
+                        Ok(false) => {}
+                        Err(error) => {
+                            if let Some(workspace) = state.workspace.as_mut() {
+                                workspace.report_error("Research", error);
+                            }
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::AssistantProgressTick => Task::none(),
+            Message::AssistantHistoryTick => {
+                for native in self.windows.values_mut() {
+                    let NativeWindow::Project(state) = native else {
+                        continue;
+                    };
+                    if !state
+                        .workspace
+                        .as_ref()
+                        .is_some_and(|workspace| workspace.assistant_history_check_pending())
+                    {
+                        continue;
+                    }
+                    let status = state
+                        .project
+                        .ports()
+                        .map(|ports| {
+                            let access = ports.access().map_err(|error| error.to_string())?;
+                            access
+                                .assistant(|assistant| {
+                                    assistant.map(|service| service.conversation_write_pending())
+                                })
+                                .map_err(|error| error.to_string())?
+                                .transpose()
+                                .map(|pending| pending.unwrap_or(false))
+                        })
+                        .unwrap_or(Ok(false));
+                    state
+                        .workspace
+                        .as_mut()
+                        .expect("pending workspace exists")
+                        .accept_assistant_history_status(status);
+                }
+                Task::none()
+            }
             #[cfg(any(test, target_os = "linux"))]
             Message::SystemAppearanceObserved(appearance) => {
                 self.system_appearance_event(appearance)
@@ -3128,8 +3867,26 @@ impl NativeDesktop {
             Message::ProjectEffectFinished {
                 window,
                 mutation,
+                opening_document,
                 result,
-            } => self.finish_project_effect(window, mutation, None, result),
+            } => {
+                if let Some((document, attempt)) = &opening_document
+                    && let Some(NativeWindow::Project(state)) = self.windows.get(&window)
+                    && let Some(workspace) = state.workspace.as_ref()
+                    && (workspace.editor().draft_transfer_attempt(document) != Some(*attempt)
+                        || !workspace.editor().initial_prose_pending(document))
+                {
+                    return Task::none();
+                }
+                if result.is_err()
+                    && let Some((document, attempt)) = opening_document.as_ref()
+                    && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                {
+                    fail_draft_transfer(state, document, *attempt, true);
+                    self.closing_windows.remove(&window);
+                }
+                self.finish_project_effect(window, mutation, None, result)
+            }
             Message::HistoryWorkflowFinished {
                 window,
                 session,
@@ -3152,7 +3909,14 @@ impl NativeDesktop {
                         run.result
                     }
                     Err(message) => Err(ProjectRuntimeError::Port {
-                        service: "History workflow",
+                        service: if matches!(
+                            mutation.effect,
+                            ProjectEffect::SetContinuityDecision { .. }
+                        ) {
+                            "Continuity decision"
+                        } else {
+                            "History workflow"
+                        },
                         message,
                     }),
                 };
@@ -3172,8 +3936,17 @@ impl NativeDesktop {
                 window,
                 mutation,
                 target,
+                draft_mount,
                 result,
             } => {
+                if let Some((document, attempt)) = &draft_mount
+                    && let Some(NativeWindow::Project(state)) = self.windows.get(&window)
+                    && let Some(workspace) = state.workspace.as_ref()
+                    && (workspace.editor().draft_transfer_attempt(document) != Some(*attempt)
+                        || !workspace.editor().initial_prose_pending(document))
+                {
+                    return Task::none();
+                }
                 if let Some((pane, generation)) = target {
                     let current = self.windows.get(&window).and_then(|native| match native {
                         NativeWindow::Project(state) => state.workspace.as_ref(),
@@ -3185,7 +3958,14 @@ impl NativeDesktop {
                         return Task::none();
                     }
                 }
-                self.finish_editor_effect(window, mutation, result)
+                if result.is_err()
+                    && let Some((document, attempt)) = draft_mount.as_ref()
+                    && let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window)
+                {
+                    fail_draft_transfer(state, document, *attempt, true);
+                    self.closing_windows.remove(&window);
+                }
+                self.finish_editor_effect(window, mutation, draft_mount, result)
             }
             Message::SpellcheckFinished {
                 window,
@@ -4327,6 +5107,21 @@ impl NativeDesktop {
         {
             subscriptions.push(Subscription::run_with(deadline, deadline_ticks));
         }
+        if self.windows.values().any(|window| matches!(window, NativeWindow::Project(state) if state.workspace.as_ref().is_some_and(|workspace| workspace.assistant_history_check_pending()))) {
+            subscriptions.push(iced::time::every(Duration::from_millis(250)).map(|_| Message::AssistantHistoryTick));
+        }
+        if self.windows.values().any(|window| {
+            matches!(window, NativeWindow::Project(state)
+            if state.workspace.as_ref().is_some_and(|workspace|
+                matches!(workspace.assistant_tab(), crate::AssistantDockTab::Ask | crate::AssistantDockTab::Research)
+                    && workspace.assistant_thread(workspace.assistant_tab())
+                        .is_some_and(|thread| thread.pending.is_some())))
+        }) {
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(100))
+                    .map(|_| Message::AssistantProgressTick),
+            );
+        }
         // Cursor moves matter while dragging a splitter or selecting text.
         // Avoid rebuilding the editor surface for ordinary pointer motion.
         if self.windows.values().any(
@@ -4621,7 +5416,6 @@ impl NativeDesktop {
                         | "search.next"
                         | "search.previous"
                         | "view.focus"
-                        | "view.companion"
                 ))
         {
             return Task::none();
@@ -4694,29 +5488,6 @@ impl NativeDesktop {
                     },
                 )),
             ),
-            "outline.open-beside" => {
-                let node = match self.windows.get(&id) {
-                    Some(NativeWindow::Project(state)) => {
-                        state.workspace.as_ref().and_then(|workspace| {
-                            workspace
-                                .explorer()
-                                .selected_ids()
-                                .into_iter()
-                                .next()
-                                .map(str::to_owned)
-                        })
-                    }
-                    _ => None,
-                };
-                node.map_or_else(Task::none, |node| {
-                    self.update_project_surface(
-                        id,
-                        ProjectSurfaceMessage::Project(
-                            ProjectMessage::OpenHierarchyNodeInCompanion(node),
-                        ),
-                    )
-                })
-            }
             "outline.delete" => {
                 let allowed = matches!(self.windows.get(&id), Some(NativeWindow::Project(state))
                     if state.shell.destination() == RibbonDestination::Cards
@@ -4760,8 +5531,8 @@ impl NativeDesktop {
                 id,
                 ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::BeginComment),
             ),
-            "view.focus" | "view.companion" | "search.local" | "search.replace" | "tab.close"
-            | "tab.next" | "tab.previous" | "tab.move-pane" | "search.next" | "search.previous" => {
+            "view.focus" | "search.local" | "search.replace" | "tab.close" | "tab.next"
+            | "tab.previous" | "search.next" | "search.previous" => {
                 let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
                     return Task::none();
                 };
@@ -4772,17 +5543,10 @@ impl NativeDesktop {
                 let editor = workspace.editor().pane(pane);
                 let message = match command {
                     "view.focus" => crate::EditorMessage::TogglePaneFocus(pane),
-                    "view.companion" => crate::EditorMessage::ToggleCompanion,
                     "search.local" | "search.replace" => crate::EditorMessage::OpenLocalFind,
                     "search.next" => crate::EditorMessage::NavigateFind(crate::FindDirection::Next),
                     "search.previous" => {
                         crate::EditorMessage::NavigateFind(crate::FindDirection::Previous)
-                    }
-                    "tab.move-pane" => {
-                        let Some(document_id) = editor.active_document().map(str::to_owned) else {
-                            return Task::none();
-                        };
-                        crate::EditorMessage::MoveTabToOtherPane { pane, document_id }
                     }
                     "tab.close" => {
                         let Some(document_id) = editor.active_document().map(str::to_owned) else {
@@ -5557,16 +6321,6 @@ impl NativeDesktop {
                         .saturating_sub(position.x.max(0.0) as u32);
                     state.shell.layout_mut().resize_inspector(width);
                 }
-                Some(SidebarPanel::Editor) => {
-                    let center = state.shell.layout().center();
-                    if center.width() > 0 {
-                        let ratio = (position.x - center.x() as f32 - 48.0)
-                            / (center.width() as f32 - 48.0).max(1.0);
-                        if let Some(workspace) = state.workspace.as_mut() {
-                            workspace.editor_mut().set_split_ratio(f64::from(ratio));
-                        }
-                    }
-                }
                 None => {}
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -5707,7 +6461,7 @@ impl NativeDesktop {
                 if workspace.editor().expanded_pane().is_some() {
                     layout.ribbon().width() as f32
                 } else {
-                    layout.center().width().saturating_sub(48) as f32
+                    crate::iced_project_surface::editor_measure_width(layout) as f32
                 }
             });
             crate::iced_editor_surface::editor_center_surface_with_breadcrumbs_at_width(
@@ -5802,12 +6556,24 @@ impl NativeDesktop {
                             ]
                             .spacing(2)
                             .width(Length::Fill),
-                            button(text("Dismiss").size(11)).on_press(
-                                Message::DismissNotification {
-                                    window: id,
-                                    notification_id: notification.id,
-                                }
-                            ),
+                            button(
+                                text(
+                                    if notification
+                                        .action_key
+                                        .as_deref()
+                                        .is_some_and(|key| key.starts_with("draft-transfer:"))
+                                    {
+                                        "Discard unsaved draft text"
+                                    } else {
+                                        "Dismiss"
+                                    }
+                                )
+                                .size(11)
+                            )
+                            .on_press(Message::DismissNotification {
+                                window: id,
+                                notification_id: notification.id,
+                            }),
                         ]
                         .align_y(iced::alignment::Vertical::Top),
                     )
@@ -5966,6 +6732,49 @@ impl NativeDesktop {
         id: window::Id,
         message: ProjectSurfaceMessage,
     ) -> Task<Message> {
+        self.update_project_surface_with_origin(id, message, false)
+    }
+
+    fn update_project_surface_with_origin(
+        &mut self,
+        id: window::Id,
+        message: ProjectSurfaceMessage,
+        draft_initialization: bool,
+    ) -> Task<Message> {
+        if self.closing_windows.contains(&id)
+            && matches!(
+                &message,
+                ProjectSurfaceMessage::Project(
+                    ProjectMessage::SetAssistantDraft { .. }
+                        | ProjectMessage::EditAssistantDraft { .. }
+                        | ProjectMessage::UndoAssistantDraft { .. }
+                        | ProjectMessage::NewAssistantConversation(_)
+                        | ProjectMessage::SelectAssistantConversation { .. }
+                        | ProjectMessage::CommitAssistantConversationRename { .. }
+                        | ProjectMessage::ConfirmAssistantConversationDelete { .. }
+                        | ProjectMessage::SubmitAssistant { .. }
+                        | ProjectMessage::CancelAssistant { .. }
+                        | ProjectMessage::ConfirmClearAssistant
+                        | ProjectMessage::RetryAssistantHistory
+                        | ProjectMessage::ToggleAssistantContextRule { .. }
+                        | ProjectMessage::SetAssistantContextScope { .. }
+                        | ProjectMessage::SetAssistantSelectionOnly { .. }
+                        | ProjectMessage::SetAssistantNotes { .. }
+                        | ProjectMessage::BeginResearchImport { .. }
+                        | ProjectMessage::BeginManualResearchImport
+                        | ProjectMessage::SetResearchSourceUrl(_)
+                        | ProjectMessage::SetResearchImportTitle(_)
+                        | ProjectMessage::SetResearchImportDestination(_)
+                        | ProjectMessage::SetResearchImportForm(_)
+                        | ProjectMessage::SelectResearchOriginal(_)
+                        | ProjectMessage::ResumeResearchImport
+                        | ProjectMessage::CancelResearchImport
+                        | ProjectMessage::ConfirmResearchImport
+                )
+            )
+        {
+            return Task::none();
+        }
         if matches!(self.windows.get(&id), Some(NativeWindow::Project(state)) if state.history_restore_is_busy())
         {
             return Task::none();
@@ -6059,9 +6868,366 @@ impl NativeDesktop {
         let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
             return Task::none();
         };
+        if !draft_initialization
+            && matches!(
+                &message,
+                ProjectSurfaceMessage::ReturnToWriting
+                    | ProjectSurfaceMessage::Project(ProjectMessage::OpenAssistantPassage(_))
+                    | ProjectSurfaceMessage::Project(ProjectMessage::OpenHierarchyNode(_))
+                    | ProjectSurfaceMessage::Project(ProjectMessage::ActivateCard(_))
+                    | ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::NewTab(_))
+                    | ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Scratch { .. })
+                    | ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        crate::EditorMessage::ActivateTab { .. }
+                            | crate::EditorMessage::CloseTab { .. }
+                    ))
+                    | ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Mounted {
+                        message: parchmint_editor_iced::MountedEditorMessage::Focus(_)
+                            | parchmint_editor_iced::MountedEditorMessage::SetSelection(_)
+                            | parchmint_editor_iced::MountedEditorMessage::Scroll { .. }
+                            | parchmint_editor_iced::MountedEditorMessage::KeyCommand(_)
+                            | parchmint_editor_iced::MountedEditorMessage::InsertText(_)
+                            | parchmint_editor_iced::MountedEditorMessage::Clipboard(_)
+                            | parchmint_editor_iced::MountedEditorMessage::ToggleInlineMark(_)
+                            | parchmint_editor_iced::MountedEditorMessage::SetLink(_)
+                            | parchmint_editor_iced::MountedEditorMessage::ToggleBlockFormat(_)
+                            | parchmint_editor_iced::MountedEditorMessage::InsertAtomicBlock(_)
+                            | parchmint_editor_iced::MountedEditorMessage::ApplyParagraphStyle(_),
+                        ..
+                    })
+                    | ProjectSurfaceMessage::EditorCenter(EditorCenterMessage::Workspace(
+                        crate::EditorMessage::Format(_)
+                            | crate::EditorMessage::Undo
+                            | crate::EditorMessage::Redo
+                            | crate::EditorMessage::ApplyLink
+                            | crate::EditorMessage::RemoveLink
+                            | crate::EditorMessage::NavigateFind(_)
+                    ))
+            )
+        {
+            state.assistant_interaction_generation =
+                state.assistant_interaction_generation.saturating_add(1);
+            state.pending_assistant_navigation = None;
+        }
+        let assistant_interaction_generation = state.assistant_interaction_generation;
+        if matches!(
+            &message,
+            ProjectSurfaceMessage::Project(
+                ProjectMessage::OpenAssistantPassage(_) | ProjectMessage::SelectAssistantTab(_)
+            )
+        ) {
+            Self::sync_live_editor_revisions(state);
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::OpenAssistantPassage(source)) =
+            &message
+            && state.workspace.as_ref().is_some_and(|workspace| {
+                workspace.assistant_return().is_none()
+                    && workspace.assistant_source_is_current(source)
+                    && workspace.node_for_document(&source.document_id).is_some()
+            })
+            && let Some(location) = Self::capture_assistant_return(state)
+            && let Some(workspace) = state.workspace.as_mut()
+        {
+            workspace.remember_assistant_return(location);
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::OpenAssistantPassage(source)) =
+            &message
+            && let Some(workspace) = state.workspace.as_ref()
+            && workspace.assistant_source_is_current(source)
+            && let Some(draft) = workspace
+                .editor()
+                .pane(EditorPane::Primary)
+                .active_document()
+            && workspace.editor().scratch_is_pending(draft)
+        {
+            state.pending_assistant_navigation = Some(PendingAssistantNavigation {
+                source: source.clone(),
+                draft: draft.to_owned(),
+                interaction_generation: assistant_interaction_generation,
+            });
+            return Task::none();
+        }
+        if matches!(message, ProjectSurfaceMessage::ReturnToWriting) {
+            return Self::return_to_writing_task(id, state, assistant_interaction_generation);
+        }
+        if let ProjectSurfaceMessage::OpenAssistantSource(url) = &message {
+            return Self::link_action_task(id, state, url.clone(), false);
+        }
+        if let ProjectSurfaceMessage::SaveResearchOriginal(source_id) = &message {
+            let Some(ports) = state.project.ports().cloned() else {
+                return Task::none();
+            };
+            let source_id = *source_id;
+            let capability = state.project.window;
+            let session = state.project.session;
+            return Task::perform(
+                async move {
+                    let selected = {
+                        let access = ports.access().map_err(|error| error.to_string())?;
+                        let selected = access
+                            .platform_services()
+                            .map_err(|error| error.to_string())?
+                            .dialogs
+                            .choose_path(
+                                capability,
+                                PathDialog {
+                                    kind: PathDialogKind::SaveFile,
+                                    title: Some("Save original research source".into()),
+                                },
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if selected.window() != capability {
+                            return Err(
+                                "The save dialog is no longer available for this project.".into()
+                            );
+                        }
+                        selected.into_value()
+                    };
+                    let Some(destination) = selected else {
+                        return Ok(false);
+                    };
+                    let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                    worker_pool::submit(move || {
+                        let result = (|| {
+                            let access = ports.access().map_err(|error| error.to_string())?;
+                            access
+                                .workflows(|workflows| {
+                                    workflows.save_research_original(source_id, destination)
+                                })
+                                .map_err(|error| error.to_string())?
+                                .map_err(|error| error.to_string())
+                        })();
+                        let _ = sender.send(result);
+                    })?;
+                    receiver
+                        .await
+                        .map_err(|_| "The save worker stopped.".to_owned())??;
+                    Ok(true)
+                },
+                move |result| Message::ResearchOriginalSaved {
+                    window: id,
+                    capability,
+                    session,
+                    result,
+                },
+            );
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::SubmitAssistant {
+            tab,
+            conversation_id,
+        }) = &message
+        {
+            if state.workspace.as_ref().is_some_and(|workspace| {
+                workspace.assistant_tab() == *tab
+                    && workspace
+                        .assistant_thread(*tab)
+                        .is_some_and(|thread| thread.id == *conversation_id)
+            }) {
+                return Self::assistant_request_task(id, state);
+            }
+            return Task::none();
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::ProposeCheckEdit {
+            conversation_id,
+            turn,
+            finding,
+            evidence,
+        }) = &message
+        {
+            return Self::assistant_edit_proposal_task(
+                id,
+                state,
+                conversation_id,
+                *turn,
+                *finding,
+                *evidence,
+            );
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::ApplyCheckEdit { conversation_id }) =
+            &message
+        {
+            return Self::apply_assistant_edit(id, state, conversation_id);
+        }
+        if matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::RetryAssistantHistory)
+        ) {
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
+        if let ProjectSurfaceMessage::Project(ProjectMessage::CancelAssistant {
+            tab,
+            conversation_id,
+        }) = &message
+        {
+            if let Some(workspace) = state.workspace.as_mut()
+                && let Some(thread) = workspace.assistant_thread_by_id_mut(*tab, conversation_id)
+                && let Some(pending) = thread.pending.take()
+            {
+                pending
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                thread.progress = Default::default();
+                if pending.edit_origin.is_none()
+                    && !thread.interrupted_prompts.contains(&pending.prompt)
+                {
+                    thread.interrupted_prompts.push(pending.prompt);
+                }
+                thread.error =
+                    Some("Request stopped. The provider may still charge for it.".into());
+            }
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
         let Some(workspace) = state.workspace.as_mut() else {
             return Task::none();
         };
+
+        if matches!(
+            message,
+            ProjectSurfaceMessage::Project(ProjectMessage::ConfirmClearAssistant)
+        ) {
+            workspace.update(ProjectMessage::ConfirmClearAssistant);
+            workspace.mark_assistant_history_touched();
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
+
+        if let ProjectSurfaceMessage::Project(ProjectMessage::SetAssistantDraft {
+            tab,
+            conversation_id,
+            value,
+        }) = &message
+        {
+            workspace.update(ProjectMessage::SetAssistantDraft {
+                tab: *tab,
+                conversation_id: conversation_id.clone(),
+                value: value.clone(),
+            });
+            workspace.mark_assistant_history_touched();
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
+
+        if let ProjectSurfaceMessage::Project(ProjectMessage::EditAssistantDraft {
+            tab,
+            conversation_id,
+            action,
+        }) = &message
+        {
+            let edited = action.is_edit();
+            workspace.update(ProjectMessage::EditAssistantDraft {
+                tab: *tab,
+                conversation_id: conversation_id.clone(),
+                action: action.clone(),
+            });
+            if edited {
+                workspace.mark_assistant_history_touched();
+                let error = Self::queue_assistant_conversation(state).err();
+                if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                    workspace.set_assistant_history_error(Some(error));
+                }
+            }
+            return Task::none();
+        }
+
+        if let ProjectSurfaceMessage::Project(ProjectMessage::UndoAssistantDraft {
+            tab,
+            conversation_id,
+            redo,
+        }) = &message
+        {
+            workspace.update(ProjectMessage::UndoAssistantDraft {
+                tab: *tab,
+                conversation_id: conversation_id.clone(),
+                redo: *redo,
+            });
+            workspace.mark_assistant_history_touched();
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
+
+        if matches!(
+            message,
+            ProjectSurfaceMessage::Project(
+                ProjectMessage::SaveAssistantSettings | ProjectMessage::RemoveAssistantKey
+            )
+        ) {
+            let settings = workspace.assistant_settings_mut();
+            if settings.busy {
+                return Task::none();
+            }
+            settings.busy = true;
+            settings.error = None;
+            let removing_key = matches!(
+                message,
+                ProjectSurfaceMessage::Project(ProjectMessage::RemoveAssistantKey)
+            );
+            let mut profile = if removing_key {
+                settings.saved_profile.clone()
+            } else {
+                settings.profile.clone()
+            };
+            if !removing_key {
+                let values = crate::project_workspace::parse_dollars(&settings.budget_draft)
+                    .zip(crate::project_workspace::parse_dollars(
+                        &settings.warning_draft,
+                    ))
+                    .zip(settings.reset_draft.parse::<u8>().ok());
+                let Some(((budget, warning), reset)) =
+                    values.filter(|((budget, warning), reset)| {
+                        *budget > 0 && warning <= budget && (1..=28).contains(reset)
+                    })
+                else {
+                    settings.busy = false;
+                    settings.error = Some(
+                        "Enter a valid monthly limit, warning amount, and reset day from 1 to 28."
+                            .into(),
+                    );
+                    return Task::none();
+                };
+                profile.monthly_budget_cents = budget;
+                profile.warning_cents = warning;
+                profile.reset_day = reset;
+            }
+            let key = if removing_key {
+                Default::default()
+            } else {
+                settings.key.clone()
+            };
+            let session_only = settings.session_only;
+            let edit_generation = settings.edit_generation;
+            let session = state.project.session;
+            let callbacks = Arc::clone(&self.callbacks);
+            return Task::perform(
+                Self::run_blocking_operation("save AI assistant settings", move || {
+                    callbacks.configure_assistant(profile, key, session_only, removing_key)
+                }),
+                move |result| Message::AssistantSettingsFinished {
+                    window: id,
+                    session,
+                    edit_generation,
+                    removing_key,
+                    result,
+                },
+            );
+        }
 
         if matches!(
             &message,
@@ -6076,6 +7242,12 @@ impl NativeDesktop {
             workspace.update(ProjectMessage::CloseHierarchyContextMenu);
         }
         let message = match message {
+            ProjectSurfaceMessage::OpenAssistantSettings => {
+                workspace.update(ProjectMessage::SelectSettingsCategory(
+                    crate::SettingsCategory::AiAssistant,
+                ));
+                ProjectSurfaceMessage::Navigate(RibbonDestination::Settings)
+            }
             ProjectSurfaceMessage::OpenDocumentHistory(document_id) => {
                 if workspace
                     .explorer()
@@ -6279,6 +7451,10 @@ impl NativeDesktop {
                 }
             }
             ProjectSurfaceMessage::ShowProjectChooser
+            | ProjectSurfaceMessage::OpenAssistantSettings
+            | ProjectSurfaceMessage::OpenAssistantSource(_)
+            | ProjectSurfaceMessage::ReturnToWriting
+            | ProjectSurfaceMessage::SaveResearchOriginal(_)
             | ProjectSurfaceMessage::OpenDocumentHistory(_) => unreachable!(),
             ProjectSurfaceMessage::ToggleExplorer => {
                 let visible = workspace.editor().expanded_pane().is_some()
@@ -6292,8 +7468,15 @@ impl NativeDesktop {
                 }
             }
             ProjectSurfaceMessage::ToggleInspector => {
+                let notes_selected = workspace.assistant_tab() == crate::AssistantDockTab::Notes;
                 let visible = workspace.editor().expanded_pane().is_some()
-                    || !state.shell.layout().inspector_is_visible();
+                    || !state.shell.layout().inspector_is_visible()
+                    || !notes_selected;
+                if visible {
+                    workspace.update(ProjectMessage::SelectAssistantTab(
+                        crate::AssistantDockTab::Notes,
+                    ));
+                }
                 state.shell.layout_mut().set_inspector_visible(visible);
                 workspace.editor_mut().exit_pane_focus();
                 Task::none()
@@ -6384,6 +7567,9 @@ impl NativeDesktop {
                     message = ProjectMessage::CommitOutlineHierarchyRename;
                 }
                 let opened_document = match &message {
+                    ProjectMessage::OpenAssistantPassage(source) => workspace
+                        .assistant_source_is_current(source)
+                        .then(|| source.document_id.clone()),
                     ProjectMessage::ActivateCard(node_id)
                     | ProjectMessage::OpenHierarchyNode(node_id)
                     | ProjectMessage::OpenHierarchyNodeInCompanion(node_id) => workspace
@@ -6454,8 +7640,68 @@ impl NativeDesktop {
                 } else if matches!(message, ProjectMessage::ShowExplorer) {
                     state.shell.close_global_search();
                 }
+                let persist_research_draft = matches!(
+                    &message,
+                    ProjectMessage::BeginResearchImport { .. }
+                        | ProjectMessage::NewAssistantConversation(_)
+                        | ProjectMessage::SelectAssistantConversation { .. }
+                        | ProjectMessage::CommitAssistantConversationRename { .. }
+                        | ProjectMessage::ConfirmAssistantConversationDelete { .. }
+                        | ProjectMessage::BeginManualResearchImport
+                        | ProjectMessage::SetResearchSourceUrl(_)
+                        | ProjectMessage::SetResearchImportTitle(_)
+                        | ProjectMessage::SetResearchImportDestination(_)
+                        | ProjectMessage::SetResearchImportForm(_)
+                        | ProjectMessage::SelectResearchOriginal(_)
+                        | ProjectMessage::ResumeResearchImport
+                        | ProjectMessage::CancelResearchImport
+                        | ProjectMessage::ConfirmResearchImport
+                        | ProjectMessage::ToggleAssistantContextRule { .. }
+                        | ProjectMessage::SetAssistantContextScope { .. }
+                        | ProjectMessage::SetAssistantSelectionOnly { .. }
+                );
                 let previous_section = workspace.cards().section_id().to_owned();
-                let effects = workspace.update(message);
+                let mut effects = workspace.update(message);
+                for effect in &mut effects {
+                    if let ProjectEffect::NavigateAssistantPassage {
+                        interaction_generation,
+                        ..
+                    } = effect
+                    {
+                        *interaction_generation = assistant_interaction_generation;
+                    }
+                }
+                if persist_research_draft {
+                    workspace.mark_assistant_history_touched();
+                    let snapshot = workspace.assistant_conversation_snapshot();
+                    let queued = state
+                        .project
+                        .ports()
+                        .map(|ports| {
+                            let access = ports.access().map_err(|error| error.to_string())?;
+                            access
+                                .assistant(|assistant| {
+                                    assistant.map(|service| service.queue_conversation(snapshot))
+                                })
+                                .map_err(|error| error.to_string())?
+                                .transpose()
+                        })
+                        .unwrap_or(Ok(None));
+                    match queued {
+                        Ok(Some(())) => workspace.set_assistant_history_check_pending(true),
+                        Ok(None) => {}
+                        Err(error) => {
+                            workspace.set_assistant_history_error(Some(error));
+                            if let Some(nonce) = effects.iter().find_map(|effect| match effect {
+                                ProjectEffect::ImportResearch { nonce, .. } => Some(*nonce),
+                                _ => None,
+                            }) {
+                                workspace.complete_research_import(nonce, false);
+                                return Task::none();
+                            }
+                        }
+                    }
+                }
                 let cards_section_changed = workspace.cards().section_id() != previous_section;
                 if let Some(document_id) = opened_document {
                     state.shell.select_destination(RibbonDestination::Editor);
@@ -7402,6 +8648,7 @@ impl NativeDesktop {
                     id,
                     state.effect_executor.clone(),
                     direct,
+                    state.workspace.as_deref(),
                 ));
                 tasks.push(if retry_project {
                     Self::retry_project_mutation(id, state)
@@ -7445,10 +8692,6 @@ impl NativeDesktop {
                     {
                         return Task::none();
                     }
-                }
-                if matches!(message, EditorCenterMessage::BeginSplitResize) {
-                    state.resizing = Some(SidebarPanel::Editor);
-                    return Task::none();
                 }
                 if let EditorCenterMessage::HierarchyDropTarget(pane) = message {
                     workspace.editor_mut().hover_tab_pane(pane);
@@ -7514,6 +8757,7 @@ impl NativeDesktop {
                 for workspace_message in message.workspace_messages() {
                     effects.extend(workspace.editor_mut().update(workspace_message));
                 }
+                workspace.prune_assistant_return();
                 let note_delete_after = workspace.editor().pending_delete_note().is_some();
                 if restore_pane_focus {
                     let editor = workspace.editor();
@@ -7755,6 +8999,10 @@ impl NativeDesktop {
                     };
                     match update {
                         Ok(update) => {
+                            if draft_initialization && update.document_changed() {
+                                state.draft_initialization_committed = true;
+                            }
+                            let mut presentation_succeeded = true;
                             if presentation_changed
                                 && let Some(binding) = state.editor_bindings.get(&pane)
                                 && let Some(adapter) = state.project.editor_adapter()
@@ -7808,6 +9056,7 @@ impl NativeDesktop {
                                     &session,
                                 )
                             {
+                                presentation_succeeded = false;
                                 self.status = Some(DesktopStatus::Error(error));
                             }
                             let revision = update.revision();
@@ -7823,10 +9072,21 @@ impl NativeDesktop {
                             };
                             workspace.update(ProjectMessage::MarkEditorDirty);
                             state.autosave.mark_dirty(session, revision, Instant::now());
+                            if let Some(document) = state.mounted_documents.get(&pane) {
+                                workspace.editor_mut().update(
+                                    crate::EditorMessage::SetDocumentRevision {
+                                        document_id: stable_id_string(document.as_bytes()),
+                                        revision: revision.value(),
+                                    },
+                                );
+                            }
                             let delay = if completed_word { 150 } else { 400 };
                             state
                                 .pending_spellchecks
                                 .insert(view, Instant::now() + Duration::from_millis(delay));
+                            if draft_initialization && presentation_succeeded {
+                                state.draft_initialization_succeeded = true;
+                            }
                             return Task::none();
                         }
                         Err(parchmint_editor_api::EditorError::InvalidCommand { reason })
@@ -7846,8 +9106,19 @@ impl NativeDesktop {
                                 && let Ok(revision) = adapter.revision(session.clone())
                                 && revision > before
                             {
+                                if draft_initialization {
+                                    state.draft_initialization_committed = true;
+                                }
                                 workspace.update(ProjectMessage::MarkEditorDirty);
                                 state.autosave.mark_dirty(session, revision, Instant::now());
+                                if let Some(document) = state.mounted_documents.get(&pane) {
+                                    workspace.editor_mut().update(
+                                        crate::EditorMessage::SetDocumentRevision {
+                                            document_id: stable_id_string(document.as_bytes()),
+                                            revision: revision.value(),
+                                        },
+                                    );
+                                }
                             }
                             self.status = Some(DesktopStatus::Error(error.to_string()));
                         }
@@ -7884,15 +9155,26 @@ impl NativeDesktop {
         window: window::Id,
         executor: Option<NativeProjectEffectExecutor>,
         effects: Vec<ProjectEffect>,
+        workspace: Option<&ProjectWorkspace>,
     ) -> Task<Message> {
         let Some(executor) = executor else {
             return Task::none();
         };
-        Task::batch(
-            effects
-                .into_iter()
-                .map(|effect| Self::project_effect_task(window, executor.clone(), None, effect)),
-        )
+        Task::batch(effects.into_iter().map(|effect| {
+            let opening_document = match &effect {
+                ProjectEffect::OpenDocumentInPrimary(document)
+                | ProjectEffect::OpenDocumentInCompanion(document) => {
+                    workspace.and_then(|workspace| {
+                        workspace
+                            .editor()
+                            .draft_transfer_attempt(document)
+                            .map(|attempt| (document.clone(), attempt))
+                    })
+                }
+                _ => None,
+            };
+            Self::project_effect_task(window, executor.clone(), None, effect, opening_document)
+        }))
     }
 
     fn launch_project_mutation(
@@ -7904,6 +9186,7 @@ impl NativeDesktop {
             return Task::perform(async {}, move |_| Message::ProjectEffectFinished {
                 window,
                 mutation: Some(ticket),
+                opening_document: None,
                 result: Err(ProjectRuntimeError::InvalidEffect(
                     "project mutation executor is unavailable",
                 )),
@@ -7911,7 +9194,9 @@ impl NativeDesktop {
         };
         if matches!(
             ticket.effect,
-            ProjectEffect::CreateNamedSnapshot(_) | ProjectEffect::RestoreHistory { .. }
+            ProjectEffect::CreateNamedSnapshot(_)
+                | ProjectEffect::RestoreHistory { .. }
+                | ProjectEffect::SetContinuityDecision { .. }
         ) {
             let prepared = (|| {
                 let ports = state
@@ -7932,6 +9217,7 @@ impl NativeDesktop {
                     return Task::done(Message::ProjectEffectFinished {
                         window,
                         mutation: Some(ticket),
+                        opening_document: None,
                         result: Err(ProjectRuntimeError::Port {
                             service: "History workflow",
                             message,
@@ -7948,14 +9234,20 @@ impl NativeDesktop {
                 workspace.update(ProjectMessage::StartSave(workspace.project_revision()));
             }
             let effect = ticket.effect.clone();
+            let operation = if matches!(ticket.effect, ProjectEffect::SetContinuityDecision { .. })
+            {
+                "save continuity decision"
+            } else {
+                "save History"
+            };
             return Task::perform(
-                Self::run_blocking_operation("save History", move || {
+                Self::run_blocking_operation(operation, move || {
                     Ok(run_projection_sequence(
                         &plans,
                         |plan| {
                             Self::persist_projection(&ports, adapter.as_ref(), plan).map_err(
                                 |message| ProjectRuntimeError::Port {
-                                    service: "History draft projection",
+                                    service: "Project draft projection",
                                     message,
                                 },
                             )
@@ -7981,6 +9273,7 @@ impl NativeDesktop {
             executor,
             Some(ticket.clone()),
             ticket.effect.clone(),
+            None,
         )
     }
 
@@ -8229,11 +9522,13 @@ impl NativeDesktop {
         executor: NativeProjectEffectExecutor,
         mutation: Option<ProjectMutationTicket>,
         effect: ProjectEffect,
+        opening_document: Option<(String, u64)>,
     ) -> Task<Message> {
         Task::perform(executor.execute_project_effect(effect), move |result| {
             Message::ProjectEffectFinished {
                 window,
                 mutation,
+                opening_document,
                 result,
             }
         })
@@ -8940,6 +10235,7 @@ impl NativeDesktop {
         state
             .autosave
             .mark_dirty(mutation.editor_session, mutation.revision, Instant::now());
+        Self::sync_live_editor_revisions(state);
         self.status = mutation
             .presentation_error
             .map(DesktopStatus::Error)
@@ -8952,7 +10248,17 @@ impl NativeDesktop {
         state: &mut NativeProjectState,
         effects: Vec<EditorEffect>,
     ) -> Task<Message> {
+        Self::editor_effect_tasks_checked(window, state, effects, None).0
+    }
+
+    fn editor_effect_tasks_checked(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        effects: Vec<EditorEffect>,
+        initializing: Option<(ViewId, &str)>,
+    ) -> (Task<Message>, bool) {
         let mut tasks = Vec::new();
+        let mut commands_succeeded = true;
         for effect in effects {
             // Authoring uses the document and selection which received the
             // action. Sending it through a task would resolve a reused view
@@ -8964,15 +10270,18 @@ impl NativeDesktop {
                         .any(|pane| {
                             let current = workspace.editor().pane(pane);
                             current.view() == view
-                                && current
-                                    .active_document()
-                                    .is_some_and(|id| workspace.editor().scratch(id).is_some())
+                                && current.active_document().is_some_and(|id| {
+                                    workspace.editor().scratch(id).is_some()
+                                        && initializing != Some((view, id))
+                                })
                         })
                 }) {
+                    commands_succeeded = false;
                     continue;
                 }
                 let comments_changed = updates_comment_threads(&command);
                 let comment_command = comments_changed.then(|| command.clone());
+                let blocked_by_restore = state.history_restore_is_busy();
                 match Self::apply_editor_command(state, view, command) {
                     Ok(Some((session, revision))) => {
                         if let Some(workspace) = state.workspace.as_mut() {
@@ -9008,8 +10317,9 @@ impl NativeDesktop {
                         state.autosave.mark_dirty(session, revision, Instant::now());
                         state.pending_spellchecks.insert(view, Instant::now());
                     }
-                    Ok(None) => {}
+                    Ok(None) => commands_succeeded &= !blocked_by_restore,
                     Err(error) => {
+                        commands_succeeded = false;
                         if let Some(workspace) = state.workspace.as_mut() {
                             workspace.report_error("editor", error);
                         }
@@ -9018,10 +10328,10 @@ impl NativeDesktop {
                 continue;
             }
             if let EditorEffect::MountDocument { document_id, .. } = &effect
-                && state
-                    .workspace
-                    .as_ref()
-                    .is_some_and(|workspace| workspace.editor().scratch(document_id).is_some())
+                && state.workspace.as_ref().is_some_and(|workspace| {
+                    workspace.editor().scratch(document_id).is_some()
+                        && !workspace.editor().initial_prose_pending(document_id)
+                })
             {
                 continue;
             }
@@ -9045,6 +10355,19 @@ impl NativeDesktop {
                         (Some(current.view()) == view).then_some((pane, current.mount_generation()))
                     })
             });
+            let draft_mount = match &effect {
+                EditorEffect::MountDocument { document_id, .. } => {
+                    state.workspace.as_ref().and_then(|workspace| {
+                        workspace
+                            .editor()
+                            .initial_prose_pending(document_id)
+                            .then(|| workspace.editor().draft_transfer_attempt(document_id))
+                            .flatten()
+                            .map(|attempt| (document_id.clone(), attempt))
+                    })
+                }
+                _ => None,
+            };
             let project_mutations = &state.project_mutations;
             let opaque_mutations = &mut state.opaque_mutations;
             let mutation = editor_effect_requires_durability(&effect)
@@ -9064,6 +10387,7 @@ impl NativeDesktop {
                                         window,
                                         mutation: Some(token),
                                         target: None,
+                                        draft_mount: None,
                                         result: Err(ProjectRuntimeError::InvalidEffect(
                                             "project dictionary executor is unavailable",
                                         )),
@@ -9076,6 +10400,7 @@ impl NativeDesktop {
                                     window,
                                     mutation: Some(token),
                                     target: None,
+                                    draft_mount: None,
                                     result,
                                 },
                             )
@@ -9088,6 +10413,7 @@ impl NativeDesktop {
                             window,
                             mutation: Some(token),
                             target: None,
+                            draft_mount: None,
                             result,
                         },
                     ));
@@ -9100,6 +10426,7 @@ impl NativeDesktop {
                                     window,
                                     mutation: Some(token),
                                     target: None,
+                                    draft_mount: None,
                                     result: Err(ProjectRuntimeError::InvalidEffect(
                                         "project dictionary executor is unavailable",
                                     )),
@@ -9112,6 +10439,7 @@ impl NativeDesktop {
                                 window,
                                 mutation: Some(token),
                                 target: None,
+                                draft_mount: None,
                                 result,
                             },
                         )
@@ -9125,12 +10453,13 @@ impl NativeDesktop {
                         window,
                         mutation: None,
                         target,
+                        draft_mount,
                         result,
                     },
                 ));
             }
         }
-        Task::batch(tasks)
+        (Task::batch(tasks), commands_succeeded)
     }
 
     fn finish_project_effect(
@@ -9244,6 +10573,11 @@ impl NativeDesktop {
                 if let Some(project_ui) = state.project.project_ui.as_mut() {
                     project_ui.snapshot = Arc::clone(&snapshot);
                 }
+                let completed_research_import =
+                    mutation.as_ref().and_then(|ticket| match &ticket.effect {
+                        ProjectEffect::ImportResearch { nonce, .. } => Some(*nonce),
+                        _ => None,
+                    });
                 if let Some(document) = restored_document
                     && let Err(error) = Self::remount_replaced_documents(
                         state,
@@ -9271,11 +10605,20 @@ impl NativeDesktop {
                     workspace.update(ProjectMessage::SaveCompleted(
                         snapshot.project.revision.value(),
                     ));
+                    if let Some(nonce) = completed_research_import {
+                        workspace.complete_research_import(nonce, true);
+                    }
                     if history_action.is_some() {
                         workspace.complete_history_workflow();
                         if workspace.modal().is_none() {
                             state.shell.dismiss_dialog();
                         }
+                    }
+                }
+                if completed_research_import.is_some() {
+                    let error = Self::queue_assistant_conversation(state).err();
+                    if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                        workspace.set_assistant_history_error(Some(error));
                     }
                 }
                 let creating_hierarchy = matches!(
@@ -9345,6 +10688,12 @@ impl NativeDesktop {
                         workspace
                             .editor_mut()
                             .promote_scratch(&scratch_id, &document, &title);
+                        workspace.remap_assistant_return_for_promotion(&scratch_id, &document);
+                        if let Some(pending) = state.pending_assistant_navigation.as_mut()
+                            && pending.draft == scratch_id
+                        {
+                            pending.draft = document.clone();
+                        }
                         workspace.remap_promoted_close(&scratch_id, &document);
                         // Keep the initial input mounted until recovery owns it.
                         if ![EditorPane::Primary, EditorPane::Companion]
@@ -9401,8 +10750,12 @@ impl NativeDesktop {
                     }
                 }
                 self.status = None;
-                let reopen =
-                    Self::project_effect_tasks(window, state.effect_executor.clone(), reopen);
+                let reopen = Self::project_effect_tasks(
+                    window,
+                    state.effect_executor.clone(),
+                    reopen,
+                    state.workspace.as_deref(),
+                );
                 let refresh = if history_action.is_some() {
                     match (state.service_feeds.as_ref(), state.workspace.as_mut()) {
                         (Some(feeds), Some(workspace)) => {
@@ -9639,9 +10992,23 @@ impl NativeDesktop {
                 let mut spellcheck_tasks = Vec::new();
                 for document in documents {
                     let pane = document.pane;
+                    let mounted_document = document.load.document_id;
                     if let Err(error) =
                         Self::mount_resolved_document(state, document, self.appearance)
                     {
+                        let pending = state
+                            .workspace
+                            .as_ref()
+                            .and_then(|workspace| workspace.editor().pane(pane).active_document())
+                            .map(str::to_owned);
+                        if let Some(document) = pending
+                            && let Some(attempt) = state.workspace.as_ref().and_then(|workspace| {
+                                workspace.editor().draft_transfer_attempt(&document)
+                            })
+                        {
+                            fail_draft_transfer(state, &document, attempt, true);
+                            self.closing_windows.remove(&window);
+                        }
                         state.editor_hosts.insert(
                             pane,
                             crate::iced_editor_surface::EditorPaneSlot::state(
@@ -9653,12 +11020,21 @@ impl NativeDesktop {
                         self.status = Some(DesktopStatus::Error(error));
                         break;
                     }
-                    if let Some(workspace) = state.workspace.as_mut() {
+                    if state.mounted_documents.get(&pane) == Some(&mounted_document)
+                        && let Some(workspace) = state.workspace.as_mut()
+                    {
                         let current = workspace.editor().pane(pane);
-                        if let Some(document) = current.active_document().map(str::to_owned) {
+                        if let Some(document) = current.active_document().map(str::to_owned)
+                            && mount_matches_active_document(Some(&document), mounted_document)
+                        {
                             let view = current.view();
                             let mount_generation = current.mount_generation();
-                            if let Some(text) = workspace.editor_mut().take_initial_prose(&document)
+                            let attempt = workspace.editor().draft_transfer_attempt(&document);
+                            if workspace
+                                .editor_mut()
+                                .take_initial_prose(&document)
+                                .is_some()
+                                && let Some(attempt) = attempt
                             {
                                 spellcheck_tasks.push(Task::done(Message::DraftMounted {
                                     window,
@@ -9666,7 +11042,7 @@ impl NativeDesktop {
                                     document,
                                     view,
                                     mount_generation,
-                                    text,
+                                    attempt,
                                 }));
                             }
                         }
@@ -9797,6 +11173,207 @@ impl NativeDesktop {
                 }
                 Task::none()
             }
+            Ok(ProjectEffectCompletion::NavigateAssistantPassage {
+                snapshot,
+                document,
+                range,
+                source,
+                mount_generation,
+                interaction_generation,
+            }) => {
+                if state.assistant_interaction_generation != interaction_generation
+                    || !state.workspace.as_ref().is_some_and(|workspace| {
+                        workspace.editor().pane(document.pane).mount_generation()
+                            == mount_generation
+                            && mount_matches_active_document(
+                                workspace.editor().pane(document.pane).active_document(),
+                                document.load.document_id,
+                            )
+                    })
+                {
+                    return Task::none();
+                }
+                Self::accept_hydrated_snapshot(state, *snapshot);
+                if let Err(error) = Self::mount_resolved_document(state, document, self.appearance)
+                {
+                    self.status = Some(DesktopStatus::Error(error));
+                    return Task::none();
+                }
+                let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) else {
+                    return Task::none();
+                };
+                let Some(adapter) = state.project.editor_adapter() else {
+                    return Task::none();
+                };
+                let session = binding.session();
+                let result = (|| {
+                    let revision = adapter
+                        .revision(session.clone())
+                        .map_err(|error| error.to_string())?;
+                    if revision.value() != source.document_revision {
+                        return Err(
+                            "This passage has changed since the assistant request.".to_owned()
+                        );
+                    }
+                    let projection = iced::futures::executor::block_on(
+                        adapter.project(session.clone(), revision),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if !assistant_passage_matches(projection.semantic(), range, &source.text) {
+                        return Err(
+                            "This passage no longer matches the assistant's source.".to_owned()
+                        );
+                    }
+                    adapter
+                        .execute(
+                            session.clone(),
+                            EditorCommandOrigin::new(binding.view()),
+                            AdapterEditorCommand::new(
+                                revision,
+                                EditorCommandKind::SetSelection {
+                                    selection: EditorSelection::new(
+                                        range.start().into(),
+                                        range.end().into(),
+                                    ),
+                                },
+                            ),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    binding.refresh().map_err(|error| error.to_string())?;
+                    binding
+                        .reveal_position(range.start().into())
+                        .map_err(|error| error.to_string())?;
+                    binding.restore_focus().map_err(|error| error.to_string())?;
+                    adapter
+                        .view_snapshot(session, binding.view())
+                        .map(|snapshot| snapshot.presentation.pixel_scroll_y)
+                        .map_err(|error| error.to_string())
+                })();
+                match result {
+                    Ok(offset) => {
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            workspace
+                                .editor_mut()
+                                .set_scroll_offset(EditorPane::Primary, offset);
+                        }
+                        self.status = None;
+                    }
+                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
+                }
+                Task::none()
+            }
+            Ok(ProjectEffectCompletion::ReturnToWriting {
+                snapshot,
+                document,
+                session,
+                revision,
+                selection,
+                scroll_y,
+                mount_generation,
+                interaction_generation,
+            }) => {
+                if state.assistant_interaction_generation != interaction_generation
+                    || !state.workspace.as_ref().is_some_and(|workspace| {
+                        workspace.editor().pane(document.pane).mount_generation()
+                            == mount_generation
+                            && mount_matches_active_document(
+                                workspace.editor().pane(document.pane).active_document(),
+                                document.load.document_id,
+                            )
+                    })
+                {
+                    return Task::none();
+                }
+                Self::accept_hydrated_snapshot(state, *snapshot);
+                if let Err(error) = Self::mount_resolved_document(state, document, self.appearance)
+                {
+                    self.status = Some(DesktopStatus::Error(error));
+                    return Task::none();
+                }
+                let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) else {
+                    return Task::none();
+                };
+                let Some(adapter) = state.project.editor_adapter() else {
+                    return Task::none();
+                };
+                let current_session = binding.session();
+                let result = (|| {
+                    let current_revision = adapter
+                        .revision(current_session.clone())
+                        .map_err(|error| error.to_string())?;
+                    if current_session != session || current_revision != revision {
+                        binding.restore_focus().map_err(|error| error.to_string())?;
+                        return Ok(None);
+                    }
+                    adapter
+                        .execute(
+                            current_session.clone(),
+                            EditorCommandOrigin::new(binding.view()),
+                            AdapterEditorCommand::new(
+                                current_revision,
+                                EditorCommandKind::SetSelection { selection },
+                            ),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    binding.refresh().map_err(|error| error.to_string())?;
+                    binding.restore_focus().map_err(|error| error.to_string())?;
+                    let presentation = adapter
+                        .view_snapshot(current_session.clone(), binding.view())
+                        .map_err(|error| error.to_string())?
+                        .presentation;
+                    if scroll_y.is_finite() {
+                        binding
+                            .update(parchmint_editor_iced::MountedEditorMessage::Scroll {
+                                delta_y: scroll_y.max(0.0) - presentation.pixel_scroll_y,
+                                viewport: presentation.viewport,
+                            })
+                            .map_err(|error| error.to_string())?;
+                    }
+                    let offset = adapter
+                        .view_snapshot(current_session, binding.view())
+                        .map_err(|error| error.to_string())?
+                        .presentation
+                        .pixel_scroll_y;
+                    Ok::<_, String>(Some(offset))
+                })();
+                match result {
+                    Ok(offset) => {
+                        if let Some(workspace) = state.workspace.as_mut() {
+                            if let Some(offset) = offset {
+                                workspace
+                                    .editor_mut()
+                                    .set_scroll_offset(EditorPane::Primary, offset);
+                            }
+                            workspace.clear_assistant_return();
+                        }
+                        self.status = offset
+                            .is_none()
+                            .then(|| DesktopStatus::Info("Writing position changed".into()));
+                        Self::workspace_persist_task(window, state)
+                    }
+                    Err(error) => {
+                        self.status = Some(DesktopStatus::Error(error));
+                        Task::none()
+                    }
+                }
+            }
+            Err(ProjectRuntimeError::ResearchNotStarted(error)) => {
+                if let Some(workspace) = state.workspace.as_mut()
+                    && let Some(ProjectEffect::ImportResearch { nonce, .. }) =
+                        mutation.as_ref().map(|ticket| &ticket.effect)
+                {
+                    workspace.fail_research_import_before_mutation(*nonce, error);
+                }
+                if let Err(error) = Self::queue_assistant_conversation(state)
+                    && let Some(workspace) = state.workspace.as_mut()
+                {
+                    workspace.set_assistant_history_error(Some(error));
+                }
+                let terminal = mutation.map(PersistentMutationTerminal::ProjectDiscarded);
+                terminal.map_or_else(Task::none, |terminal| {
+                    self.after_persistent_mutation_terminal(window, terminal, None)
+                })
+            }
             Err(ProjectRuntimeError::StaleSession { .. }) => {
                 if history_action.is_some()
                     && let Some(workspace) = state.workspace.as_mut()
@@ -9874,6 +11451,176 @@ impl NativeDesktop {
         Ok(())
     }
 
+    fn capture_assistant_return(
+        state: &NativeProjectState,
+    ) -> Option<crate::project_workspace::AssistantReturnLocation> {
+        use crate::project_workspace::AssistantReturnLocation;
+        let workspace = state.workspace.as_ref()?;
+        let tab_id = workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .active_document()?
+            .to_owned();
+        if workspace.editor().scratch(&tab_id).is_some() {
+            return Some(AssistantReturnLocation::Scratch { tab_id });
+        }
+        let binding = state.editor_bindings.get(&EditorPane::Primary)?;
+        let document = *state.mounted_documents.get(&EditorPane::Primary)?;
+        if !mount_matches_active_document(Some(&tab_id), document) {
+            return None;
+        }
+        let adapter = state.project.editor_adapter()?;
+        let session = binding.session();
+        let revision = adapter.revision(session.clone()).ok()?;
+        let selection = adapter.selection(session.clone(), binding.view()).ok()?;
+        let scroll_y = adapter
+            .view_snapshot(session.clone(), binding.view())
+            .ok()?
+            .presentation
+            .pixel_scroll_y;
+        Some(AssistantReturnLocation::Document {
+            tab_id,
+            document,
+            session,
+            revision,
+            selection,
+            scroll_y,
+        })
+    }
+
+    fn return_to_writing_task(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        interaction_generation: u64,
+    ) -> Task<Message> {
+        use crate::project_workspace::AssistantReturnLocation;
+        let Some(location) = state
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.assistant_return().cloned())
+        else {
+            return Task::none();
+        };
+        let tab_id = location.tab_id().to_owned();
+        let Some(workspace) = state.workspace.as_mut() else {
+            return Task::none();
+        };
+        if !workspace
+            .editor()
+            .pane(EditorPane::Primary)
+            .tabs()
+            .iter()
+            .any(|tab| tab.id() == tab_id)
+        {
+            workspace.clear_assistant_return();
+            return Task::none();
+        }
+        state.shell.select_destination(RibbonDestination::Editor);
+        state
+            .shell
+            .focus(crate::FocusTarget::EditorDocument(tab_id.clone()));
+        match location {
+            AssistantReturnLocation::Scratch { .. } => {
+                let still_scratch = workspace.editor().scratch(&tab_id).is_some();
+                let effects = workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::ActivateTab {
+                        pane: EditorPane::Primary,
+                        document_id: tab_id.clone(),
+                    });
+                workspace.clear_assistant_return();
+                Task::batch([
+                    Self::editor_effect_tasks(window, state, effects),
+                    Self::workspace_persist_task(window, state),
+                    if still_scratch {
+                        iced::widget::operation::focus(iced::widget::Id::from(format!(
+                            "scratch-editor-{tab_id}"
+                        )))
+                    } else {
+                        Task::none()
+                    },
+                ])
+            }
+            AssistantReturnLocation::Document {
+                document,
+                session,
+                revision,
+                selection,
+                scroll_y,
+                ..
+            } => {
+                workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::ActivateTab {
+                        pane: EditorPane::Primary,
+                        document_id: tab_id.clone(),
+                    });
+                let mount_generation = workspace
+                    .editor()
+                    .pane(EditorPane::Primary)
+                    .mount_generation();
+                let effect = ProjectEffect::ReturnToWriting {
+                    document_id: tab_id,
+                    session,
+                    revision,
+                    selection,
+                    scroll_y,
+                    mount_generation,
+                    interaction_generation,
+                };
+                // The bookmark's document identity must agree with its tab.
+                if !mount_matches_active_document(
+                    workspace
+                        .editor()
+                        .pane(EditorPane::Primary)
+                        .active_document(),
+                    document,
+                ) {
+                    workspace.clear_assistant_return();
+                    return Task::none();
+                }
+                Task::batch([
+                    Self::project_effect_tasks(
+                        window,
+                        state.effect_executor.clone(),
+                        vec![effect],
+                        state.workspace.as_deref(),
+                    ),
+                    Self::workspace_persist_task(window, state),
+                ])
+            }
+        }
+    }
+
+    fn sync_live_editor_revisions(state: &mut NativeProjectState) {
+        let Some(adapter) = state.project.editor_adapter() else {
+            return;
+        };
+        let mut revisions = BTreeMap::new();
+        for (document, session) in &state.retained_editor_sessions {
+            if let Ok(revision) = adapter.revision(session.clone()) {
+                revisions.insert(*document, revision.value());
+            }
+        }
+        for (pane, document) in &state.mounted_documents {
+            if let Some(binding) = state.editor_bindings.get(pane)
+                && let Ok(revision) = adapter.revision(binding.session())
+            {
+                revisions.insert(*document, revision.value());
+            }
+        }
+        if let Some(workspace) = state.workspace.as_mut() {
+            for (document, revision) in revisions {
+                workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::SetDocumentRevision {
+                        document_id: stable_id_string(document.as_bytes()),
+                        revision,
+                    });
+            }
+        }
+    }
+
     fn accept_hydrated_snapshot(state: &mut NativeProjectState, mut snapshot: ProjectSnapshot) {
         if let Some(current) = state.project.project_ui.as_ref().map(|ui| &ui.snapshot) {
             // Loading a chapter is a read, not a project mutation. Its captured
@@ -9919,6 +11666,7 @@ impl NativeDesktop {
         &mut self,
         window: window::Id,
         mutation: Option<OpaqueMutationToken>,
+        draft_mount: Option<(String, u64)>,
         result: Result<EditorEffectCompletion, ProjectRuntimeError>,
     ) -> Task<Message> {
         match result {
@@ -9981,6 +11729,14 @@ impl NativeDesktop {
                 let Some(NativeWindow::Project(state)) = self.windows.get_mut(&window) else {
                     return Task::none();
                 };
+                let draft_pane = match (&intent, draft_mount.as_ref()) {
+                    (EditorRuntimeIntent::Mount { pane, load, .. }, Some((document, _)))
+                        if stable_id_string(load.document_id.as_bytes()) == *document =>
+                    {
+                        Some(*pane)
+                    }
+                    _ => None,
+                };
                 if let EditorRuntimeIntent::Mount {
                     pane,
                     load,
@@ -10033,8 +11789,36 @@ impl NativeDesktop {
                             .unwrap_or_else(Task::none);
                         return spellcheck;
                     }
-                    Ok(None) => {}
-                    Err(error) => self.status = Some(DesktopStatus::Error(error)),
+                    Ok(None) => {
+                        if let (Some(pane), Some((document, attempt)), Some(workspace)) =
+                            (draft_pane, draft_mount.as_ref(), state.workspace.as_mut())
+                        {
+                            let current = workspace.editor().pane(pane);
+                            let view = current.view();
+                            let mount_generation = current.mount_generation();
+                            if workspace
+                                .editor_mut()
+                                .take_initial_prose(document)
+                                .is_some()
+                            {
+                                return Task::done(Message::DraftMounted {
+                                    window,
+                                    pane,
+                                    document: document.to_owned(),
+                                    view,
+                                    mount_generation,
+                                    attempt: *attempt,
+                                });
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        if let Some((document, attempt)) = draft_mount.as_ref() {
+                            fail_draft_transfer(state, document, *attempt, true);
+                            self.closing_windows.remove(&window);
+                        }
+                        self.status = Some(DesktopStatus::Error(error));
+                    }
                 }
                 Task::none()
             }
@@ -10486,6 +12270,7 @@ impl NativeDesktop {
                     .map(|revision| (session, revision))
             });
         let result = Self::execute_editor_command(state, view, command);
+        Self::sync_live_editor_revisions(state);
         // A layout or presentation failure can happen after the document
         // transaction succeeds. Keep that accepted revision on the save and
         // recovery frontier even when the action reports an error.
@@ -11362,6 +13147,945 @@ impl NativeDesktop {
             .map_err(|_| format!("{operation_name} worker stopped without a result"))?
     }
 
+    fn create_assistant_note(
+        state: &mut NativeProjectState,
+        origin: &crate::project_workspace::AssistantNoteOrigin,
+        body: &str,
+    ) -> Result<String, String> {
+        let binding = state
+            .editor_bindings
+            .get(&EditorPane::Primary)
+            .filter(|binding| binding.view() == origin.view && binding.session() == origin.session)
+            .ok_or_else(|| {
+                "The original document is no longer open; the proposed note is retained.".to_owned()
+            })?;
+        if state.mounted_documents.get(&EditorPane::Primary) != Some(&origin.document)
+            || !state.workspace.as_ref().is_some_and(|workspace| {
+                mount_matches_active_document(
+                    workspace
+                        .editor()
+                        .pane(EditorPane::Primary)
+                        .active_document(),
+                    origin.document,
+                )
+            })
+        {
+            return Err("The original document changed; the proposed note is retained.".into());
+        }
+        let adapter = state
+            .project
+            .editor_adapter()
+            .ok_or_else(|| "The editor is unavailable.".to_owned())?;
+        if adapter
+            .revision(binding.session())
+            .map_err(|_| "The editor is unavailable.".to_owned())?
+            != origin.revision
+        {
+            return Err("The document changed; select the passage again before creating this note. The proposed note is retained.".into());
+        }
+        let id = unique_comment_id(state, origin.document, origin.revision, 0, &[]);
+        let change = Self::apply_editor_command(
+            state,
+            origin.view,
+            crate::EditorCommand::CreateComment {
+                body: body.to_owned(),
+                document_level: origin.selection.is_collapsed(),
+                anchor: Some((origin.revision, origin.selection)),
+            },
+        )?
+        .ok_or_else(|| {
+            "The note could not be created; the proposed note is retained.".to_owned()
+        })?;
+        state
+            .autosave
+            .mark_dirty(change.0.clone(), change.1, Instant::now());
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.update(ProjectMessage::MarkEditorDirty);
+            if let Some(adapter) = state.project.editor_adapter()
+                && let Ok(projection) =
+                    iced::futures::executor::block_on(adapter.project(change.0, change.1))
+            {
+                workspace.editor_mut().reconcile_document_comments(
+                    &stable_id_string(origin.document.as_bytes()),
+                    projection.comments(),
+                );
+            }
+        }
+        Ok(stable_id_string(id.as_bytes()))
+    }
+
+    fn queue_assistant_conversation(state: &mut NativeProjectState) -> Result<(), String> {
+        let Some(workspace) = state.workspace.as_ref() else {
+            return Ok(());
+        };
+        if !workspace.assistant_history_touched() {
+            return Ok(());
+        }
+        let Some(ports) = state.project.ports() else {
+            return Ok(());
+        };
+        let snapshot = workspace.assistant_conversation_snapshot();
+        let access = ports.access().map_err(|error| error.to_string())?;
+        access
+            .assistant(|assistant| assistant.map(|service| service.queue_conversation(snapshot)))
+            .map_err(|error| error.to_string())?
+            .transpose()?;
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.set_assistant_history_check_pending(true);
+        }
+        Ok(())
+    }
+
+    fn apply_assistant_edit(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        conversation_id: &str,
+    ) -> Task<Message> {
+        use crate::AssistantDockTab;
+        let proposal = state.workspace.as_ref().and_then(|workspace| {
+            if workspace.assistant_tab() != AssistantDockTab::Check {
+                return None;
+            }
+            let thread = workspace.assistant_thread(AssistantDockTab::Check)?;
+            (thread.id == conversation_id && thread.pending.is_none())
+                .then(|| thread.edit_proposal.clone())
+                .flatten()
+        });
+        let Some(proposal) = proposal else {
+            return Task::none();
+        };
+        let validated = (|| -> Result<_, String> {
+            let workspace = state
+                .workspace
+                .as_ref()
+                .ok_or("The project is unavailable.")?;
+            if !workspace.check_edit_is_current(conversation_id, &proposal.origin) {
+                return Err("The source or project context changed. Run the check again.".into());
+            }
+            let binding = state
+                .editor_bindings
+                .get(&EditorPane::Primary)
+                .ok_or("Open the target passage before applying this edit.")?;
+            let session = binding.session();
+            if proposal.origin.session.as_ref() != Some(&session)
+                || state.mounted_documents.get(&EditorPane::Primary)
+                    != Some(&proposal.target.document)
+                || !mount_matches_active_document(
+                    workspace
+                        .editor()
+                        .pane(EditorPane::Primary)
+                        .active_document(),
+                    proposal.target.document,
+                )
+            {
+                return Err(
+                    "The original editor session is no longer open. Run the check again.".into(),
+                );
+            }
+            let adapter = state
+                .project
+                .editor_adapter()
+                .cloned()
+                .ok_or("The editor is unavailable.")?;
+            let revision = adapter
+                .revision(session.clone())
+                .map_err(|error| error.to_string())?;
+            if revision.value() != proposal.target.revision {
+                return Err("The document changed. Run the check again.".into());
+            }
+            let projection =
+                iced::futures::executor::block_on(adapter.project(session.clone(), revision))
+                    .map_err(|_| "Could not verify the current passage.")?;
+            let start =
+                usize::try_from(proposal.target.start).map_err(|_| "The passage is invalid.")?;
+            let length = usize::try_from(
+                proposal
+                    .target
+                    .end
+                    .checked_sub(proposal.target.start)
+                    .ok_or("The passage is invalid.")?,
+            )
+            .map_err(|_| "The passage is invalid.")?;
+            if !projection
+                .semantic()
+                .plain_text()
+                .chars()
+                .skip(start)
+                .take(length)
+                .eq(proposal.target.original.chars())
+            {
+                return Err("The passage changed. Run the check again.".into());
+            }
+            Ok((adapter, session, binding.view(), revision))
+        })();
+        let (adapter, session, view, revision) = match validated {
+            Ok(values) => values,
+            Err(error) => {
+                if let Some(thread) = state.workspace.as_mut().and_then(|workspace| {
+                    workspace.assistant_thread_by_id_mut(AssistantDockTab::Check, conversation_id)
+                }) {
+                    thread.error = Some(error);
+                }
+                return Task::none();
+            }
+        };
+        let result = adapter.execute(
+            session.clone(),
+            EditorCommandOrigin::new(view),
+            AdapterEditorCommand::new(
+                revision,
+                EditorCommandKind::ReplaceRangeWithSemanticText {
+                    range: EditorSelection::new(
+                        proposal.target.start.into(),
+                        proposal.target.end.into(),
+                    ),
+                    text: proposal.replacement,
+                    marks: Vec::new(),
+                },
+            ),
+        );
+        let current = adapter.revision(session.clone());
+        // Retain the preview only when the adapter confirms execution failed
+        // without advancing the document. An ambiguous operation is never replayed.
+        let consumed =
+            result.is_ok() || current.as_ref().ok().is_none_or(|after| *after > revision);
+        if consumed
+            && let Some(thread) = state.workspace.as_mut().and_then(|workspace| {
+                workspace.assistant_thread_by_id_mut(AssistantDockTab::Check, conversation_id)
+            })
+        {
+            thread.edit_proposal = None;
+        }
+        if let Ok(after) = current.as_ref()
+            && *after > revision
+        {
+            state
+                .autosave
+                .mark_dirty(session.clone(), *after, Instant::now());
+            if let Some(workspace) = state.workspace.as_mut() {
+                workspace.update(ProjectMessage::MarkEditorDirty);
+                workspace
+                    .editor_mut()
+                    .update(crate::EditorMessage::SetDocumentRevision {
+                        document_id: stable_id_string(proposal.target.document.as_bytes()),
+                        revision: after.value(),
+                    });
+            }
+            state
+                .pending_spellchecks
+                .insert(view, Instant::now() + Duration::from_millis(400));
+        } else if current.is_err() {
+            state.autosave.mark_dirty(
+                session.clone(),
+                EditorRevision::from(revision.value().saturating_add(1)),
+                Instant::now(),
+            );
+            if let Some(workspace) = state.workspace.as_mut() {
+                workspace.update(ProjectMessage::MarkEditorDirty);
+            }
+        }
+        let presentation = Self::refresh_shared_editor_hosts(&state.editor_bindings, &session);
+        if let Some(error) = result
+            .err()
+            .map(|error| error.to_string())
+            .or_else(|| current.err().map(|error| error.to_string()))
+            .or_else(|| presentation.err())
+            && let Some(thread) = state.workspace.as_mut().and_then(|workspace| {
+                workspace.assistant_thread_by_id_mut(AssistantDockTab::Check, conversation_id)
+            })
+        {
+            thread.error = Some(if consumed {
+                format!("The edit may have been applied; check the document. {error}")
+            } else {
+                format!("The edit wasn't applied. {error}")
+            });
+        }
+        let _ = window;
+        Task::none()
+    }
+
+    fn assistant_edit_proposal_task(
+        window: window::Id,
+        state: &mut NativeProjectState,
+        conversation_id: &str,
+        turn: usize,
+        finding: usize,
+        evidence: usize,
+    ) -> Task<Message> {
+        use parchmint_assistant_api::AssistantMode;
+        let Some(workspace) = state.workspace.as_ref() else {
+            return Task::none();
+        };
+        if workspace.assistant_tab() != crate::AssistantDockTab::Check {
+            return Task::none();
+        }
+        let Some(mut origin) =
+            workspace.check_edit_origin(conversation_id, turn, finding, evidence)
+        else {
+            return Task::none();
+        };
+        let Some(thread) = workspace.assistant_thread(crate::AssistantDockTab::Check) else {
+            return Task::none();
+        };
+        if thread.pending.is_some() || thread.edit_proposal.is_some() {
+            return Task::none();
+        }
+        let context = thread.turns[turn].result.context.clone();
+        let parse = |id: &str| stable_id_bytes(id).map(parchmint_domain::NodeId::from_bytes);
+        let (Ok(target), Ok(scope), Ok(excluded)) = (
+            parse(&origin.scope.target),
+            origin
+                .scope
+                .evidence_scope
+                .as_deref()
+                .map(parse)
+                .transpose(),
+            origin
+                .scope
+                .excluded
+                .iter()
+                .map(|id| parse(id))
+                .collect::<Result<Vec<_>, _>>(),
+        ) else {
+            return Task::none();
+        };
+        let Some(ports) = state.project.ports().cloned() else {
+            return Task::none();
+        };
+        let adapter = state.project.editor_adapter().cloned();
+        let Some(binding) = state.editor_bindings.get(&EditorPane::Primary) else {
+            return Task::none();
+        };
+        let Some(document) = state.mounted_documents.get(&EditorPane::Primary) else {
+            return Task::none();
+        };
+        let source = &origin.finding_snapshot.evidence[evidence];
+        if stable_id_string(document.as_bytes()) != source.document_id
+            || adapter
+                .as_ref()
+                .and_then(|adapter| adapter.revision(binding.session()).ok())
+                .is_none_or(|revision| revision.value() != source.document_revision)
+        {
+            return Task::none();
+        }
+        origin.session = Some(binding.session());
+        let plans = if let Some(adapter) = adapter.as_ref() {
+            match Self::project_state_sessions(state)
+                .and_then(|sessions| editor_projection_plans(adapter, sessions, &BTreeMap::new()))
+            {
+                Ok(plans) => plans,
+                Err(_) => {
+                    state
+                        .workspace
+                        .as_mut()
+                        .unwrap()
+                        .assistant_thread_mut(crate::AssistantDockTab::Check)
+                        .error = Some("Could not capture the current editor state.".into());
+                    return Task::none();
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .assistant_thread_mut(crate::AssistantDockTab::Check);
+        thread.next_request = thread.next_request.saturating_add(1);
+        let request_id = thread.next_request;
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: request_id,
+            prompt: "Propose edit".into(),
+            cancelled: cancelled.clone(),
+            note_origin: None,
+            edit_origin: Some(origin.clone()),
+        });
+        thread.error = None;
+        let request = parchmint_ui_api::AssistantWorkflowRequest {
+            mode: AssistantMode::Ask,
+            prompt: "Propose edit".into(),
+            target: Some(target),
+            context_scope: scope,
+            selected_text: None,
+            pinned_context: Vec::new(),
+            excluded_context: excluded,
+            history: Vec::new(),
+            include_notes: false,
+            explicit_notes: None,
+            create_note: false,
+            live_documents: Vec::new(),
+            edit_proposal: Some(parchmint_ui_api::AssistantEditProposalRequest {
+                finding: origin.finding_snapshot,
+                scope: origin.scope,
+                context,
+                evidence_index: evidence,
+            }),
+        };
+        let capability = state.project.window;
+        let session = state.project.session;
+        let conversation_id = conversation_id.to_owned();
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                worker_pool::submit_assistant(move || {
+                    let result = (|| {
+                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err("Request stopped.".to_owned());
+                        }
+                        let mut request = request;
+                        if let Some(adapter) = adapter {
+                            for plan in plans {
+                                request.live_documents.push(
+                                    iced::futures::executor::block_on(
+                                        adapter.project(plan.session, plan.revision),
+                                    )
+                                    .map_err(|_| {
+                                        "Could not capture the current editor state.".to_owned()
+                                    })?,
+                                );
+                            }
+                        }
+                        let access = ports
+                            .access()
+                            .map_err(|_| "The project was closed.".to_owned())?;
+                        let result = access
+                            .assistant(|assistant| {
+                                assistant
+                                    .ok_or_else(|| {
+                                        "The assistant is unavailable for this project.".to_owned()
+                                    })?
+                                    .run(request, &cancelled)
+                                    .map_err(|error| error.to_string())
+                            })
+                            .map_err(|_| "The project was closed.".to_owned())??;
+                        if !ports.is_current() {
+                            return Err("The project was closed.".to_owned());
+                        }
+                        Ok(result)
+                    })();
+                    let _ = sender.send(result);
+                })?;
+                receiver
+                    .await
+                    .map_err(|_| "The assistant worker stopped.".to_owned())?
+            },
+            move |result| Message::AssistantFinished {
+                window,
+                capability,
+                session,
+                tab: crate::AssistantDockTab::Check,
+                conversation_id,
+                request_id,
+                result,
+            },
+        )
+    }
+
+    fn assistant_request_task(window: window::Id, state: &mut NativeProjectState) -> Task<Message> {
+        use parchmint_assistant_api::{AssistantMode, note_intent};
+        let Some(workspace) = state.workspace.as_ref() else {
+            return Task::none();
+        };
+        let tab = workspace.assistant_tab();
+        let mode = match tab {
+            crate::AssistantDockTab::Ask => AssistantMode::Ask,
+            crate::AssistantDockTab::Check => AssistantMode::Check,
+            crate::AssistantDockTab::Research => AssistantMode::Research,
+            crate::AssistantDockTab::Notes => return Task::none(),
+        };
+        let Some(thread) = workspace.assistant_thread(tab) else {
+            return Task::none();
+        };
+        if thread.pending.is_some()
+            || (thread.draft.trim().is_empty() && mode != AssistantMode::Check)
+        {
+            return Task::none();
+        }
+        let selection_only = thread.selection_only;
+        let explicit_notes = thread.explicit_notes;
+        let prompt = if thread.draft.trim().is_empty() {
+            crate::project_workspace::DEFAULT_CHECK_PROMPT.to_owned()
+        } else {
+            thread.draft.trim().to_owned()
+        };
+        let history = thread
+            .turns
+            .iter()
+            .rev()
+            .take(40)
+            .rev()
+            .map(|turn| parchmint_ui_api::AssistantHistoryTurn {
+                question: turn.question.clone(),
+                answer: assistant_history_answer(&turn.result),
+                provider_binding: turn.result.provider_binding.clone(),
+                notes_derived: turn.result.notes_derived,
+            })
+            .collect();
+        let target_id = if mode == AssistantMode::Check {
+            workspace.inspector_node_id().map(str::to_owned)
+        } else {
+            workspace
+                .editor()
+                .pane(EditorPane::Primary)
+                .active_document()
+                .and_then(|document| workspace.node_for_document(document))
+        };
+        let target = target_id
+            .as_deref()
+            .and_then(|id| stable_id_bytes(id).ok())
+            .map(parchmint_domain::NodeId::from_bytes);
+        let parse_context = |nodes: &std::collections::BTreeSet<String>| {
+            nodes
+                .iter()
+                .map(|id| stable_id_bytes(id).map(parchmint_domain::NodeId::from_bytes))
+                .collect::<Result<Vec<_>, _>>()
+        };
+        let (pinned_context, excluded_context, context_scope) = match (
+            parse_context(&thread.pinned_context),
+            parse_context(&thread.excluded_context),
+            thread
+                .context_scope
+                .as_deref()
+                .map(stable_id_bytes)
+                .transpose(),
+        ) {
+            (Ok(pinned), Ok(excluded), Ok(scope)) => (
+                pinned,
+                excluded,
+                scope.map(parchmint_domain::NodeId::from_bytes),
+            ),
+            _ => {
+                state.workspace.as_mut().unwrap().assistant_thread_mut(tab).error =
+                    Some("A saved context item is invalid. Remove it from Project context before trying again.".into());
+                return Task::none();
+            }
+        };
+        if mode == AssistantMode::Check && target.is_none() {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some("Select a document or group to check.".into());
+            return Task::none();
+        }
+        let Some(ports) = state.project.ports().cloned() else {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some("The assistant is unavailable for this project.".into());
+            return Task::none();
+        };
+        let adapter = state.project.editor_adapter().cloned();
+        let note_access = if mode == AssistantMode::Ask {
+            note_intent(&prompt)
+        } else {
+            Default::default()
+        };
+        if let Some(parchmint_ui_api::AssistantExplicitNotes::Document {
+            document: expected, ..
+        }) = explicit_notes
+        {
+            let active = workspace
+                .editor()
+                .pane(EditorPane::Primary)
+                .active_document()
+                .and_then(|id| stable_id_bytes(id).ok())
+                .map(parchmint_domain::DocumentId::from_bytes);
+            if active != Some(expected) {
+                state.workspace.as_mut().unwrap().assistant_thread_mut(tab).error = Some(
+                    "The selected notes belong to a different document. Choose the note scope again."
+                        .into(),
+                );
+                return Task::none();
+            }
+        }
+        if explicit_notes.is_some_and(|scope| match scope {
+            parchmint_ui_api::AssistantExplicitNotes::Document {
+                project_revision,
+                tree_hash,
+                ..
+            }
+            | parchmint_ui_api::AssistantExplicitNotes::Project {
+                project_revision,
+                tree_hash,
+            } => {
+                project_revision != workspace.project_revision()
+                    || Some(tree_hash) != workspace.assistant_note_tree_hash()
+            }
+        }) {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some("The project changed. Choose the note scope again.".into());
+            return Task::none();
+        }
+        if explicit_notes.is_some() && note_access.create {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some("Clear the selected note context before creating a note.".into());
+            return Task::none();
+        }
+        if explicit_notes.is_some_and(|scope| {
+            parchmint_assistant_api::explicit_note_scope_conflicts(
+                &prompt,
+                matches!(
+                    scope,
+                    parchmint_ui_api::AssistantExplicitNotes::Project { .. }
+                ),
+            )
+        }) {
+            state.workspace.as_mut().unwrap().assistant_thread_mut(tab).error = Some(
+                "The note request conflicts with the selected scope. Choose a scope or rephrase it."
+                    .into(),
+            );
+            return Task::none();
+        }
+        if selection_only && (note_access.read || explicit_notes.is_some()) {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error =
+                Some(parchmint_assistant_api::AssistantError::SelectionNoteScope.to_string());
+            return Task::none();
+        }
+        let selection_capture = if selection_only {
+            let captured = (|| {
+                let binding = state.editor_bindings.get(&EditorPane::Primary)?;
+                let document = *state.mounted_documents.get(&EditorPane::Primary)?;
+                if !mount_matches_active_document(
+                    workspace
+                        .editor()
+                        .pane(EditorPane::Primary)
+                        .active_document(),
+                    document,
+                ) {
+                    return None;
+                }
+                let adapter = adapter.as_ref()?;
+                let session = binding.session();
+                let range = adapter.selection(session.clone(), binding.view()).ok()?;
+                if range.is_collapsed()
+                    || range.end().value().saturating_sub(range.start().value())
+                        > parchmint_ui_api::MAX_ASSISTANT_SELECTION_BYTES as u64
+                {
+                    return None;
+                }
+                let selection = adapter
+                    .selection_clipboard(session.clone(), binding.view())
+                    .ok()??;
+                if selection.selection() != range {
+                    return None;
+                }
+                let text = selection.plain_text();
+                if text.trim().is_empty()
+                    || text.len() > parchmint_ui_api::MAX_ASSISTANT_SELECTION_BYTES
+                {
+                    return None;
+                }
+                Some((
+                    parchmint_ui_api::AssistantSelectedText {
+                        document,
+                        revision: selection.revision(),
+                        text: text.to_owned(),
+                    },
+                    session,
+                ))
+            })();
+            if captured.is_none() {
+                state
+                    .workspace
+                    .as_mut()
+                    .unwrap()
+                    .assistant_thread_mut(tab)
+                    .error =
+                    Some(parchmint_assistant_api::AssistantError::SelectionUnavailable.to_string());
+                return Task::none();
+            }
+            captured
+        } else {
+            None
+        };
+        if mode == AssistantMode::Ask
+            && !note_access.read
+            && explicit_notes.is_none()
+            && !note_access.create
+            && parchmint_assistant_api::note_read_needs_clarification(&prompt)
+        {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some("Clarify which notes to use. Your request is retained.".into());
+            return Task::none();
+        }
+        if explicit_notes.is_none()
+            && note_access.read
+            && !parchmint_assistant_api::note_read_scope_is_current_or_project(&prompt)
+        {
+            state.workspace.as_mut().unwrap().assistant_thread_mut(tab).error = Some(
+                "Open the document whose notes you want, or ask for notes across the project. Your request is retained.".into(),
+            );
+            return Task::none();
+        }
+        if note_access.create
+            && !parchmint_assistant_api::note_creation_targets_current_selection(&prompt)
+        {
+            let thread = state.workspace.as_mut().unwrap().assistant_thread_mut(tab);
+            thread.note_proposal = prompt
+                .split_once(':')
+                .map(|(_, body)| body.trim())
+                .filter(|body| !body.is_empty() && body.chars().count() <= 4096)
+                .map(str::to_owned);
+            thread.error = Some(
+                "Select the target passage, then use ‘Add a note here: …’ to create a note. Your request is retained.".into(),
+            );
+            let error = Self::queue_assistant_conversation(state).err();
+            if let (Some(workspace), Some(error)) = (state.workspace.as_mut(), error) {
+                workspace.set_assistant_history_error(Some(error));
+            }
+            return Task::none();
+        }
+        let note_origin = if note_access.create {
+            let captured = (|| {
+                let binding = state.editor_bindings.get(&EditorPane::Primary)?;
+                let document = *state.mounted_documents.get(&EditorPane::Primary)?;
+                if !mount_matches_active_document(
+                    workspace
+                        .editor()
+                        .pane(EditorPane::Primary)
+                        .active_document(),
+                    document,
+                ) {
+                    return None;
+                }
+                let adapter = adapter.as_ref()?;
+                let session = binding.session();
+                let view = binding.view();
+                Some(crate::project_workspace::AssistantNoteOrigin {
+                    document,
+                    revision: adapter.revision(session.clone()).ok()?,
+                    selection: adapter.selection(session.clone(), view).ok()?,
+                    session,
+                    view,
+                })
+            })();
+            if captured.is_none() {
+                state
+                    .workspace
+                    .as_mut()
+                    .unwrap()
+                    .assistant_thread_mut(tab)
+                    .error = Some("Open a document before asking to create a note.".into());
+                return Task::none();
+            }
+            captured
+        } else {
+            None
+        };
+        let plans = if mode == AssistantMode::Research {
+            Vec::new()
+        } else if let Some(adapter) = adapter.as_ref() {
+            match Self::project_state_sessions(state)
+                .and_then(|sessions| editor_projection_plans(adapter, sessions, &BTreeMap::new()))
+            {
+                Ok(plans) => plans,
+                Err(_) => {
+                    state
+                        .workspace
+                        .as_mut()
+                        .unwrap()
+                        .assistant_thread_mut(tab)
+                        .error = Some("Could not capture the current editor state.".into());
+                    return Task::none();
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        if let Some((selected, session)) = &selection_capture
+            && !plans
+                .iter()
+                .any(|plan| &plan.session == session && plan.revision == selected.revision)
+        {
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_mut(tab)
+                .error = Some(
+                "The selection changed before it could be captured. Select the text and try again."
+                    .into(),
+            );
+            return Task::none();
+        }
+        let default_check_title = (mode == AssistantMode::Check
+            && prompt == crate::project_workspace::DEFAULT_CHECK_PROMPT)
+            .then(|| {
+                state
+                    .workspace
+                    .as_ref()
+                    .and_then(|workspace| {
+                        workspace
+                            .inspector_node_id()
+                            .and_then(|node| workspace.explorer().title(node))
+                    })
+                    .map_or_else(|| "Check".to_owned(), |title| format!("Check · {title}"))
+            });
+        let thread = state.workspace.as_mut().unwrap().assistant_thread_mut(tab);
+        if thread.auto_title && thread.turns.is_empty() {
+            let title = default_check_title
+                .unwrap_or_else(|| {
+                    prompt
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .chars()
+                        .take(60)
+                        .collect::<String>()
+                })
+                .chars()
+                .take(60)
+                .collect::<String>();
+            if !title.is_empty() {
+                thread.title = title;
+                thread.auto_title = false;
+            }
+        }
+        let conversation_id = thread.id.clone();
+        thread.next_request = thread.next_request.saturating_add(1);
+        let request_id = thread.next_request;
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Every request gets its own mailbox, so a late cancelled worker
+        // cannot write into a later request or a different conversation.
+        let progress = Arc::new(std::sync::Mutex::new(String::new()));
+        thread.progress = progress.clone();
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: request_id,
+            prompt: prompt.clone(),
+            cancelled: cancelled.clone(),
+            note_origin,
+            edit_origin: None,
+        });
+        thread.error = None;
+        state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .mark_assistant_history_touched();
+        if let Err(error) = Self::queue_assistant_conversation(state) {
+            let workspace = state.workspace.as_mut().unwrap();
+            workspace.assistant_thread_mut(tab).pending = None;
+            workspace.set_assistant_history_error(Some(error));
+            return Task::none();
+        }
+        state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .assistant_thread_mut(tab)
+            .explicit_notes = None;
+        let capability = state.project.window;
+        let session = state.project.session;
+        let request = parchmint_ui_api::AssistantWorkflowRequest {
+            mode,
+            prompt,
+            target,
+            context_scope,
+            selected_text: selection_capture.map(|(selection, _)| selection),
+            pinned_context,
+            excluded_context,
+            history,
+            include_notes: note_access.read || explicit_notes.is_some(),
+            explicit_notes,
+            create_note: note_access.create,
+            live_documents: Vec::new(),
+            edit_proposal: None,
+        };
+        Task::perform(
+            async move {
+                let (sender, receiver) = iced::futures::channel::oneshot::channel();
+                worker_pool::submit_assistant(move || {
+                    let result = (|| {
+                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                            return Err("Request stopped.".to_owned());
+                        }
+                        let mut request = request;
+                        if let Some(adapter) = adapter {
+                            for plan in plans {
+                                request.live_documents.push(
+                                    iced::futures::executor::block_on(
+                                        adapter.project(plan.session, plan.revision),
+                                    )
+                                    .map_err(|_| {
+                                        "Could not capture the current editor state.".to_owned()
+                                    })?,
+                                );
+                            }
+                        }
+                        let access = ports
+                            .access()
+                            .map_err(|_| "The project was closed.".to_owned())?;
+                        let result = access
+                            .assistant(|assistant| {
+                                assistant
+                                    .ok_or_else(|| {
+                                        "The assistant is unavailable for this project.".to_owned()
+                                    })?
+                                    .run_with_progress(request, &cancelled, &mut |delta| {
+                                        const MAX_PREVIEW_BYTES: usize = 64 * 1024;
+                                        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                                            return;
+                                        }
+                                        if let Ok(mut preview) = progress.lock() {
+                                            let available =
+                                                MAX_PREVIEW_BYTES.saturating_sub(preview.len());
+                                            let mut end = available.min(delta.len());
+                                            while !delta.is_char_boundary(end) {
+                                                end -= 1;
+                                            }
+                                            preview.push_str(&delta[..end]);
+                                        }
+                                    })
+                                    .map_err(|error| error.to_string())
+                            })
+                            .map_err(|_| "The project was closed.".to_owned())??;
+                        if !ports.is_current() {
+                            return Err("The project was closed.".to_owned());
+                        }
+                        Ok(result)
+                    })();
+                    let _ = sender.send(result);
+                })?;
+                receiver
+                    .await
+                    .map_err(|_| "The assistant worker stopped.".to_owned())?
+            },
+            move |result| Message::AssistantFinished {
+                window,
+                capability,
+                session,
+                tab,
+                conversation_id,
+                request_id,
+                result,
+            },
+        )
+    }
+
     async fn run_native_blocking_operation<T, F>(
         operation_name: &'static str,
         operation: F,
@@ -11827,7 +14551,12 @@ impl NativeDesktop {
                 Vec::new()
             }
         };
-        let task = Self::project_effect_tasks(window, state.effect_executor.clone(), effects);
+        let task = Self::project_effect_tasks(
+            window,
+            state.effect_executor.clone(),
+            effects,
+            state.workspace.as_deref(),
+        );
         self.windows.insert(window, NativeWindow::Project(state));
         task
     }
@@ -11868,6 +14597,29 @@ impl NativeDesktop {
                     .as_ref()
                     .map_or(0, |project| project.snapshot.project.revision.value()),
             );
+            if let Some(project_ui) = project.project_ui.as_ref() {
+                let restored = project_ui
+                    .ports
+                    .access()
+                    .map_err(|error| error.to_string())
+                    .and_then(|access| {
+                        access
+                            .assistant(|assistant| {
+                                assistant.map(|service| service.conversation_snapshot())
+                            })
+                            .map_err(|error| error.to_string())
+                    })
+                    .and_then(|snapshot| snapshot.transpose());
+                match restored {
+                    Ok(Some(snapshot)) => {
+                        if let Err(error) = workspace.restore_assistant_conversations(snapshot) {
+                            workspace.set_assistant_history_error(Some(error));
+                        }
+                    }
+                    Err(error) => workspace.set_assistant_history_error(Some(error)),
+                    Ok(None) => {}
+                }
+            }
         }
         let editor_hosts = EditorHostSlots::default();
         let editor_bindings = BTreeMap::new();
@@ -11894,6 +14646,10 @@ impl NativeDesktop {
                 editor_bindings,
                 mounted_documents,
                 retained_editor_sessions,
+                assistant_interaction_generation: 0,
+                pending_assistant_navigation: None,
+                draft_initialization_succeeded: false,
+                draft_initialization_committed: false,
                 pending_hierarchy_rename_focus: None,
                 focus_titlebar_hidden: false,
                 pending_metadata_field_creation_focus: false,
@@ -12277,6 +15033,19 @@ impl NativeDesktop {
     }
 
     fn continue_close_window(&mut self, id: window::Id) -> Task<Message> {
+        if let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id)
+            && let Some(index) = state
+                .notifications
+                .iter()
+                .position(|notification| notification.requires_acknowledgement)
+        {
+            let notice = state.notifications.remove(index);
+            state.notifications.push(notice);
+            state.notification_drawer_open = true;
+            state.autosave.close_after_save = false;
+            self.closing_windows.remove(&id);
+            return Task::none();
+        }
         let Some(NativeWindow::Project(state)) = self.windows.get(&id) else {
             return Task::none();
         };
@@ -12299,6 +15068,18 @@ impl NativeDesktop {
             state.autosave.close_after_save = true;
             return Task::none();
         }
+        let Some(NativeWindow::Project(state)) = self.windows.get_mut(&id) else {
+            return Task::none();
+        };
+        if let Some(workspace) = state.workspace.as_mut() {
+            workspace.cancel_assistant_requests();
+        }
+        if let Err(error) = Self::queue_assistant_conversation(state) {
+            self.status = None;
+            self.closing_windows.remove(&id);
+            self.close_failures.insert(state.project.window, error);
+            return Task::none();
+        }
         let project = state.project.project.clone();
         let is_clean = state.autosave.is_clean();
         let callbacks = Arc::clone(&self.callbacks);
@@ -12315,6 +15096,10 @@ impl NativeDesktop {
         let ports = state.project.ports().cloned();
         let adapter = state.project.editor_adapter().cloned();
         let has_plans = !plans.is_empty();
+        let save_assistant_history = state
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.assistant_history_touched());
         self.status = Some(DesktopStatus::Info(if is_clean {
             "Closing project…".to_owned()
         } else {
@@ -12334,6 +15119,15 @@ impl NativeDesktop {
                         Self::persist_projection(ports, adapter.as_ref(), plan)
                     },
                     || {
+                        if save_assistant_history && let Some(ports) = ports.as_ref() {
+                            let access = ports.access().map_err(|error| error.to_string())?;
+                            access
+                                .assistant(|assistant| {
+                                    assistant.map(|service| service.flush_conversation())
+                                })
+                                .map_err(|error| error.to_string())?
+                                .transpose()?;
+                        }
                         let snapshot = ports
                             .as_ref()
                             .map(|ports| {
@@ -12363,6 +15157,9 @@ impl NativeDesktop {
         let removed = self.windows.remove(&id);
         match removed {
             Some(NativeWindow::Project(mut state)) => {
+                if let Some(workspace) = state.workspace.as_mut() {
+                    workspace.cancel_assistant_requests();
+                }
                 Self::teardown_editor_sessions(&mut state);
                 self.project_windows.remove(&state.project.window);
                 self.close_failures.remove(&state.project.window);
@@ -12407,11 +15204,26 @@ impl NativeDesktop {
             .values()
             .map(MountedEditorBinding::session)
             .collect::<BTreeSet<_>>();
+        // An unmounted document can still have an open tab in the single
+        // editor. Retain its session (and undo history) until that tab closes.
+        let open_documents = state
+            .workspace
+            .as_ref()
+            .map_or_else(BTreeSet::new, |workspace| {
+                [EditorPane::Primary, EditorPane::Companion]
+                    .into_iter()
+                    .flat_map(|pane| workspace.editor().pane(pane).tabs().iter())
+                    .filter_map(|tab| stable_id_bytes(tab.id()).ok())
+                    .map(parchmint_domain::DocumentId::from_bytes)
+                    .collect::<BTreeSet<_>>()
+            });
         let removable = state
             .retained_editor_sessions
             .iter()
-            .filter(|(_, session)| {
-                !mounted.contains(*session) && !state.autosave.dirty_sessions.contains_key(*session)
+            .filter(|(document, session)| {
+                !open_documents.contains(document)
+                    && !mounted.contains(*session)
+                    && !state.autosave.dirty_sessions.contains_key(*session)
             })
             .map(|(document, session)| (*document, session.clone()))
             .collect::<Vec<_>>();
@@ -13285,6 +16097,67 @@ fn suggested_directory_name(title: &str) -> String {
     }
 }
 
+fn assistant_history_answer(result: &parchmint_ui_api::AssistantWorkflowResult) -> String {
+    let Some(report) = &result.check_report else {
+        return result.response.text.clone();
+    };
+    fn limited(text: &str, max: usize) -> String {
+        let mut chars = text.chars();
+        let mut value = chars.by_ref().take(max).collect::<String>();
+        if chars.next().is_some() {
+            value.push('…');
+        }
+        value
+    }
+    const LIMIT: usize = 2_048;
+    let mut answer = limited(&report.summary, 400);
+    for finding in &report.findings {
+        let mut section = format!("\nPrevious {:?} finding: ", finding.category);
+        section.push_str(&limited(&finding.explanation, 300));
+        if let Some(uncertainty) = &finding.uncertainty {
+            section.push_str("\nUncertainty: ");
+            section.push_str(&limited(uncertainty, 200));
+        }
+        for source in &finding.evidence {
+            section.push_str("\nEarlier evidence from ");
+            section.push_str(&limited(&source.title, 80));
+            section.push_str(" (not a current citation): ");
+            section.push_str(&limited(&source.text, 200));
+        }
+        if answer.chars().count() + section.chars().count() + 30 > LIMIT {
+            answer.push_str("\nFurther findings omitted.");
+            break;
+        }
+        answer.push_str(&section);
+    }
+    // Forty saved turns must remain within the provider's overall input cap,
+    // including four-byte Unicode scalars and room for current evidence.
+    answer
+}
+
+fn assistant_passage_matches(
+    semantic: &parchmint_editor_api::SemanticDocument,
+    range: crate::FindMatch,
+    expected: &str,
+) -> bool {
+    let mut start = 0_u64;
+    for block in semantic.blocks() {
+        let end = start.saturating_add(block.scalar_len() as u64);
+        if range.start() >= start && range.end() <= end {
+            let offset = (range.start() - start) as usize;
+            let length = (range.end() - range.start()) as usize;
+            return block
+                .text()
+                .chars()
+                .skip(offset)
+                .take(length)
+                .eq(expected.chars());
+        }
+        start = end.saturating_add(1);
+    }
+    false
+}
+
 fn mount_matches_active_document(
     active_document: Option<&str>,
     document: parchmint_domain::DocumentId,
@@ -13475,6 +16348,107 @@ mod tests {
     static APPEARANCE_STREAM_DROPS: AtomicU64 = AtomicU64::new(0);
 
     #[test]
+    fn assistant_passage_validation_uses_scalar_offsets_and_exact_text() {
+        use parchmint_editor_api::{BlockId, SemanticBlock, SemanticBlockKind, SemanticDocument};
+        let document = SemanticDocument::new(vec![
+            SemanticBlock::new(
+                BlockId::from_bytes([1; 16]),
+                SemanticBlockKind::Paragraph,
+                None,
+                "🌊a",
+                vec![],
+            ),
+            SemanticBlock::new(
+                BlockId::from_bytes([2; 16]),
+                SemanticBlockKind::Paragraph,
+                None,
+                "  élan",
+                vec![],
+            ),
+        ]);
+        assert!(assistant_passage_matches(
+            &document,
+            crate::FindMatch::new(5, 9),
+            "élan"
+        ));
+        assert!(!assistant_passage_matches(
+            &document,
+            crate::FindMatch::new(5, 9),
+            "else"
+        ));
+        assert!(!assistant_passage_matches(
+            &document,
+            crate::FindMatch::new(1, 5),
+            "a\n  "
+        ));
+    }
+
+    #[test]
+    fn assistant_history_keeps_validated_findings_without_reusing_source_ids() {
+        use parchmint_assistant_api::{
+            AssistantResponse, CheckCategory, CheckFinding, CheckReport, ContextPassage,
+            ProjectSection,
+        };
+        let source = ContextPassage {
+            source_id: "S1".into(),
+            document_id: "document".into(),
+            document_revision: 1,
+            section: ProjectSection::Lore,
+            title: "Keeper".into(),
+            anchor: None,
+            text: "Mara holds the key.".into(),
+            original: None,
+        };
+        let mut result = parchmint_ui_api::AssistantWorkflowResult {
+            response: AssistantResponse {
+                text: "One issue".into(),
+                project_citations: vec![],
+                unverified_project_citations: vec![],
+                web_citations: vec![],
+                tool_calls: vec![],
+                usage: None,
+            },
+            check_report: Some(CheckReport {
+                summary: "One issue".into(),
+                scope: None,
+                findings: vec![CheckFinding {
+                    matched_decision_id: None,
+                    category: CheckCategory::ObjectsPossession,
+                    explanation: "The owner differs.".into(),
+                    uncertainty: Some("A transfer may explain it.".into()),
+                    evidence: [source.clone(), source],
+                }],
+            }),
+            check_report_invalid: false,
+            context: vec![],
+            context_truncated: false,
+            context_warnings: vec![],
+            estimated_cost_micros: None,
+            estimated_period_total_micros: None,
+            usage_warning: None,
+            web_retrieved_at_unix_seconds: None,
+            provider_binding: "fixture".into(),
+            notes_derived: false,
+            edit_proposal_target: None,
+        };
+        let history = assistant_history_answer(&result);
+        assert!(history.contains("ObjectsPossession"));
+        assert!(history.contains("The owner differs."));
+        assert!(history.contains("A transfer may explain it."));
+        assert!(history.contains("Mara holds the key."));
+        assert!(!history.contains("S1"));
+        assert!(history.chars().count() <= 2_048);
+        result.check_report.as_mut().unwrap().summary = "🌊".repeat(2_000);
+        let long_summary_history = assistant_history_answer(&result);
+        assert!(long_summary_history.contains("The owner differs."));
+        assert_eq!(
+            long_summary_history.matches("Mara holds the key.").count(),
+            2
+        );
+        assert!(long_summary_history.chars().count() <= 2_048);
+    }
+
+    #[test]
     fn focus_decorations_do_not_restore_maximized_windows_outside_linux() {
         use iced_test::runtime::{Action, window::Action as WindowAction};
 
@@ -13553,6 +16527,45 @@ mod tests {
         assert_eq!(
             notifications.last().map(|entry| entry.message.as_str()),
             Some("Update 51")
+        );
+    }
+
+    #[test]
+    fn required_notification_survives_overflow_and_deduplicates() {
+        let mut notifications = Vec::new();
+        append_workspace_notification(
+            &mut notifications,
+            WorkspaceNotification::action_required("document-1", "Breaks weren't added"),
+        );
+        for index in 0..60 {
+            append_workspace_notification(
+                &mut notifications,
+                WorkspaceNotification::information(format!("Update {index}")),
+            );
+        }
+        append_workspace_notification(
+            &mut notifications,
+            WorkspaceNotification::action_required("document-1", "Breaks weren't added"),
+        );
+        assert_eq!(notifications.len(), 50);
+        assert_eq!(
+            notifications
+                .iter()
+                .filter(|entry| entry.requires_acknowledgement)
+                .count(),
+            1
+        );
+        assert!(notifications.last().unwrap().requires_acknowledgement);
+        append_workspace_notification(
+            &mut notifications,
+            WorkspaceNotification::action_required("document-2", "Breaks weren't added"),
+        );
+        assert_eq!(
+            notifications
+                .iter()
+                .filter(|entry| entry.requires_acknowledgement)
+                .count(),
+            2
         );
     }
 
@@ -13718,6 +16731,121 @@ mod tests {
         };
         assert!(!state.notification_drawer_open);
         assert!(state.notifications.is_empty());
+    }
+
+    #[test]
+    fn failed_draft_transfer_keeps_text_and_requires_current_explicit_discard() {
+        let project = legacy_project(PathBuf::from("/tmp/failed-draft.parchmint"), 282);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let editor = state.workspace.as_mut().unwrap().editor_mut();
+        let scratch = editor.new_scratch(EditorPane::Primary);
+        editor.edit_scratch(
+            &scratch,
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('A')),
+        );
+        editor.promote_scratch(&scratch, "document", "Draft");
+        editor.format_scratch("document", crate::FormattingCommand::Bold);
+        editor.take_initial_prose("document");
+        let view = editor.pane(EditorPane::Primary).view();
+        let generation = editor.pane(EditorPane::Primary).mount_generation();
+        let _ = desktop.update(Message::DraftMounted {
+            window,
+            pane: EditorPane::Primary,
+            document: "document".into(),
+            view,
+            mount_generation: generation,
+            attempt: 0,
+        });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        let editor = state.workspace.as_mut().unwrap().editor_mut();
+        assert_eq!(editor.scratch("document").unwrap().text(), "A");
+        assert!(editor.scratch_is_pending("document"));
+        assert!(editor.initial_prose_pending("document"));
+        assert_eq!(editor.draft_transfer_attempt("document"), Some(1));
+        assert_eq!(editor.take_scratch_formats("document").len(), 1);
+        editor.take_initial_prose("document");
+        let _ = desktop.update(Message::ProjectEffectFinished {
+            window,
+            mutation: None,
+            opening_document: Some(("document".into(), 0)),
+            result: Err(ProjectRuntimeError::InvalidEffect("late initial failure")),
+        });
+        let _ = desktop.update(Message::EditorEffectFinished {
+            window,
+            mutation: None,
+            target: Some((EditorPane::Primary, generation)),
+            draft_mount: Some(("document".into(), 1)),
+            result: Err(ProjectRuntimeError::InvalidEffect("duplicate failure")),
+        });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        assert!(state.notifications.is_empty());
+        state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .editor_mut()
+            .rearm_initial_prose("document");
+        fail_draft_transfer(state, "document", 2, true);
+        let original_notice = state.notifications[0].id;
+        let _ = desktop.update(Message::DraftMounted {
+            window,
+            pane: EditorPane::Primary,
+            document: "document".into(),
+            view,
+            mount_generation: generation,
+            attempt: 2,
+        });
+        let _ = desktop.update(Message::ClearNotifications { window });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        assert_eq!(state.notifications.len(), 1);
+        state.workspace.as_mut().unwrap().editor_mut().edit_scratch(
+            "document",
+            iced::widget::text_editor::Action::Edit(iced::widget::text_editor::Edit::Insert('B')),
+        );
+        let _ = desktop.update(Message::DismissNotification {
+            window,
+            notification_id: original_notice,
+        });
+        let NativeWindow::Project(state) = desktop.windows.get(&window).unwrap() else {
+            panic!("project")
+        };
+        assert!(
+            state
+                .workspace
+                .as_ref()
+                .unwrap()
+                .editor()
+                .scratch("document")
+                .is_some()
+        );
+        let updated_notice = state.notifications[0].id;
+        assert_ne!(updated_notice, original_notice);
+        let _ = desktop.update(Message::DismissNotification {
+            window,
+            notification_id: updated_notice,
+        });
+        let NativeWindow::Project(state) = desktop.windows.get(&window).unwrap() else {
+            panic!("project")
+        };
+        let editor = state.workspace.as_ref().unwrap().editor();
+        assert!(editor.scratch("document").is_none());
+        assert!(!editor.scratch_is_pending("document"));
     }
 
     #[test]
@@ -14371,6 +17499,526 @@ mod tests {
             crate::ProjectFixture::Explorer,
         )));
         state.as_mut()
+    }
+
+    #[test]
+    fn stale_proposal_completion_keeps_usage_warning() {
+        use parchmint_assistant_api::{
+            CheckCategory, CheckFinding, CheckScope, ContextPassage, ProjectSection,
+        };
+        let project = legacy_project(PathBuf::from("/tmp/stale-proposal.parchmint"), 283);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let workspace = state.workspace.as_mut().unwrap();
+        let tab = crate::AssistantDockTab::Check;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        let conversation_id = thread.id.clone();
+        let document = parchmint_domain::DocumentId::from_bytes([2; 16]);
+        let passage = ContextPassage {
+            source_id: "S1".into(),
+            document_id: stable_id_string(document.as_bytes()),
+            document_revision: 1,
+            section: ProjectSection::Manuscript,
+            title: "Draft".into(),
+            anchor: Some("text:0:4".into()),
+            text: "Mara".into(),
+            original: None,
+        };
+        let origin = crate::project_workspace::AssistantEditOrigin {
+            turn: 0,
+            finding: 0,
+            evidence: 0,
+            scope: CheckScope {
+                target: "missing".into(),
+                evidence_scope: None,
+                excluded: vec![],
+                selection_only: false,
+            },
+            finding_snapshot: CheckFinding {
+                category: CheckCategory::Other,
+                explanation: "Review".into(),
+                uncertainty: None,
+                evidence: [passage.clone(), passage],
+                matched_decision_id: None,
+            },
+            session: None,
+        };
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: 1,
+            prompt: "Propose edit".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: Some(origin),
+        });
+        let result = parchmint_ui_api::AssistantWorkflowResult {
+            response: parchmint_assistant_api::AssistantResponse {
+                text: "Ivo".into(),
+                project_citations: vec![],
+                unverified_project_citations: vec![],
+                web_citations: vec![],
+                tool_calls: vec![],
+                usage: None,
+            },
+            check_report: None,
+            check_report_invalid: false,
+            context: vec![],
+            context_truncated: false,
+            context_warnings: vec![],
+            estimated_cost_micros: None,
+            estimated_period_total_micros: None,
+            usage_warning: Some("The reservation remains held.".into()),
+            web_retrieved_at_unix_seconds: None,
+            provider_binding: "fixture".into(),
+            notes_derived: false,
+            edit_proposal_target: Some(parchmint_ui_api::AssistantEditProposalTarget {
+                document,
+                revision: 1,
+                start: 0,
+                end: 4,
+                original: "Mara".into(),
+            }),
+        };
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: project.window,
+            session: project.session,
+            tab,
+            conversation_id: conversation_id.clone(),
+            request_id: 1,
+            result: Ok(result),
+        });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        let thread = state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .assistant_thread_by_id_mut(tab, &conversation_id)
+            .unwrap();
+        assert!(thread.edit_proposal.is_none());
+        assert!(
+            thread
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("reservation remains held")
+        );
+    }
+
+    #[test]
+    fn assistant_completion_stays_with_its_conversation_and_deleted_work_is_ignored() {
+        let project = legacy_project(PathBuf::from("/tmp/assistant-conversations.parchmint"), 281);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let workspace = state.workspace.as_mut().unwrap();
+        let tab = crate::AssistantDockTab::Ask;
+        workspace.update(ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        let first_id = thread.id.clone();
+        thread.draft = "First question".into();
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: 1,
+            prompt: "First question".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: None,
+        });
+        workspace.update(ProjectMessage::NewAssistantConversation(tab));
+        let second = workspace.assistant_thread_mut(tab);
+        second.draft = "Second draft".into();
+        let second_id = second.id.clone();
+        second.pending = Some(crate::project_workspace::AssistantPending {
+            id: 1,
+            prompt: "Second question".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: None,
+        });
+        let result = || {
+            Ok(parchmint_ui_api::AssistantWorkflowResult {
+                check_report: None,
+                check_report_invalid: false,
+                response: parchmint_assistant_api::AssistantResponse {
+                    text: "First answer".into(),
+                    project_citations: Vec::new(),
+                    unverified_project_citations: Vec::new(),
+                    web_citations: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                },
+                context: Vec::new(),
+                context_truncated: false,
+                context_warnings: Vec::new(),
+                estimated_cost_micros: None,
+                estimated_period_total_micros: None,
+                usage_warning: None,
+                web_retrieved_at_unix_seconds: None,
+                provider_binding: "fixture".into(),
+                notes_derived: false,
+                edit_proposal_target: None,
+            })
+        };
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: project.window,
+            session: project.session,
+            tab,
+            conversation_id: first_id.clone(),
+            request_id: 1,
+            result: result(),
+        });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        let workspace = state.workspace.as_mut().unwrap();
+        assert_eq!(workspace.assistant_thread(tab).unwrap().id, second_id);
+        assert_eq!(
+            workspace.assistant_thread(tab).unwrap().draft,
+            "Second draft"
+        );
+        assert_eq!(
+            workspace
+                .assistant_thread(tab)
+                .unwrap()
+                .pending
+                .as_ref()
+                .unwrap()
+                .prompt,
+            "Second question"
+        );
+        workspace.update(ProjectMessage::SelectAssistantConversation {
+            tab,
+            id: first_id.clone(),
+        });
+        assert_eq!(workspace.assistant_thread(tab).unwrap().turns.len(), 1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        workspace.assistant_thread_mut(tab).pending =
+            Some(crate::project_workspace::AssistantPending {
+                id: 2,
+                prompt: "Pending".into(),
+                cancelled: cancelled.clone(),
+                note_origin: None,
+                edit_origin: None,
+            });
+        workspace.update(ProjectMessage::BeginAssistantConversationDelete(tab));
+        workspace.update(ProjectMessage::ConfirmAssistantConversationDelete {
+            tab,
+            conversation_id: first_id.clone(),
+        });
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(
+            workspace
+                .assistant_thread_by_id_mut(tab, &first_id)
+                .is_none()
+        );
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: project.window,
+            session: project.session,
+            tab,
+            conversation_id: first_id.clone(),
+            request_id: 2,
+            result: result(),
+        });
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        assert!(
+            state
+                .workspace
+                .as_mut()
+                .unwrap()
+                .assistant_thread_by_id_mut(tab, &first_id)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn assistant_rejects_stale_results_and_cancellation_keeps_the_draft() {
+        let project = legacy_project(PathBuf::from("/tmp/assistant-test.parchmint"), 280);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let workspace = state.workspace.as_mut().unwrap();
+        workspace.update(ProjectMessage::SelectAssistantTab(
+            crate::AssistantDockTab::Ask,
+        ));
+        let thread = workspace.assistant_thread_mut(crate::AssistantDockTab::Ask);
+        let conversation_id = thread.id.clone();
+        thread.draft = "Original question".into();
+        let old_preview = thread.progress.clone();
+        old_preview.lock().unwrap().push_str("unfinished answer");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: 5,
+            prompt: thread.draft.clone(),
+            cancelled: cancelled.clone(),
+            note_origin: None,
+            edit_origin: None,
+        });
+        let result = || {
+            Ok(parchmint_ui_api::AssistantWorkflowResult {
+                check_report: None,
+                check_report_invalid: false,
+                response: parchmint_assistant_api::AssistantResponse {
+                    text: "Answer".into(),
+                    project_citations: Vec::new(),
+                    unverified_project_citations: Vec::new(),
+                    web_citations: Vec::new(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                },
+                context: Vec::new(),
+                context_truncated: false,
+                context_warnings: Vec::new(),
+                estimated_cost_micros: None,
+                estimated_period_total_micros: None,
+                usage_warning: None,
+                web_retrieved_at_unix_seconds: None,
+                provider_binding: "fixture-provider".into(),
+                notes_derived: false,
+                edit_proposal_target: None,
+            })
+        };
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: WindowCapability::new(280, 99),
+            session: project.session,
+            tab: crate::AssistantDockTab::Ask,
+            conversation_id: conversation_id.clone(),
+            request_id: 5,
+            result: result(),
+        });
+        let state = desktop.windows.get_mut(&window).unwrap();
+        let NativeWindow::Project(state) = state else {
+            panic!("project")
+        };
+        assert!(
+            state
+                .workspace
+                .as_ref()
+                .unwrap()
+                .assistant_thread(crate::AssistantDockTab::Ask)
+                .unwrap()
+                .pending
+                .is_some()
+        );
+        let _ = desktop.update(Message::ProjectSurface {
+            window,
+            message: ProjectSurfaceMessage::Project(ProjectMessage::CancelAssistant {
+                tab: crate::AssistantDockTab::Ask,
+                conversation_id: conversation_id.clone(),
+            }),
+        });
+        assert!(cancelled.load(Ordering::Acquire));
+        old_preview.lock().unwrap().push_str(" late text");
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: project.window,
+            session: project.session,
+            tab: crate::AssistantDockTab::Ask,
+            conversation_id: conversation_id.clone(),
+            request_id: 5,
+            result: result(),
+        });
+        let NativeWindow::Project(state) = &desktop.windows[&window] else {
+            panic!("project")
+        };
+        let thread = state
+            .workspace
+            .as_ref()
+            .unwrap()
+            .assistant_thread(crate::AssistantDockTab::Ask)
+            .unwrap();
+        assert_eq!(thread.draft, "Original question");
+        assert!(thread.turns.is_empty());
+        assert!(thread.progress.lock().unwrap().is_empty());
+
+        let NativeWindow::Project(state) = desktop.windows.get_mut(&window).unwrap() else {
+            panic!("project")
+        };
+        let thread = state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .assistant_thread_mut(crate::AssistantDockTab::Ask);
+        thread.draft = "Newer draft".into();
+        thread.pending = Some(crate::project_workspace::AssistantPending {
+            id: 6,
+            prompt: "Submitted question".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+            note_origin: None,
+            edit_origin: None,
+        });
+        let _ = desktop.update(Message::AssistantFinished {
+            window,
+            capability: project.window,
+            session: project.session,
+            tab: crate::AssistantDockTab::Ask,
+            conversation_id,
+            request_id: 6,
+            result: Err("Timeout".into()),
+        });
+        let NativeWindow::Project(state) = &desktop.windows[&window] else {
+            panic!("project")
+        };
+        let workspace = state.workspace.as_ref().unwrap();
+        let thread = workspace
+            .assistant_thread(crate::AssistantDockTab::Ask)
+            .unwrap();
+        assert_eq!(thread.draft, "Newer draft");
+        assert!(
+            thread
+                .interrupted_prompts
+                .contains(&"Submitted question".to_owned())
+        );
+        assert!(
+            workspace.assistant_conversation_snapshot().threads[0]
+                .interrupted_prompts
+                .contains(&"Submitted question".to_owned())
+        );
+    }
+
+    #[test]
+    fn failed_research_download_releases_the_mutation_lane_and_keeps_the_draft() {
+        let project = legacy_project(PathBuf::from("/tmp/research-failure.parchmint"), 282);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let workspace = state.workspace.as_mut().unwrap();
+        workspace.update(ProjectMessage::BeginManualResearchImport);
+        workspace.update(ProjectMessage::SetResearchImportTitle("Archive".into()));
+        workspace.update(ProjectMessage::SetResearchSourceUrl(
+            "https://example.com/file.pdf".into(),
+        ));
+        workspace.update(ProjectMessage::SetResearchImportForm(
+            crate::ResearchImportForm::Original,
+        ));
+        let effect = workspace
+            .update(ProjectMessage::ConfirmResearchImport)
+            .pop()
+            .unwrap();
+        let ticket = ProjectMutationTicket {
+            effect,
+            history_action: None,
+            synopsis_commit: None,
+        };
+        state.project_mutations.enqueue(ticket.clone());
+        assert_eq!(state.project_mutations.start_next(), Some(ticket.clone()));
+        let _ = desktop.finish_project_effect(
+            window,
+            Some(ticket),
+            None,
+            Err(ProjectRuntimeError::ResearchNotStarted(
+                "Download failed.".into(),
+            )),
+        );
+        let NativeWindow::Project(state) = &desktop.windows[&window] else {
+            panic!("project")
+        };
+        assert!(!state.project_mutations.blocks_close());
+        let draft = state.workspace.as_ref().unwrap().research_import().unwrap();
+        assert!(!draft.pending);
+        assert_eq!(draft.title, "Archive");
+        assert_eq!(draft.error.as_deref(), Some("Download failed."));
+    }
+
+    #[test]
+    fn assistant_note_is_created_once_at_the_captured_revision() {
+        let project = legacy_project(PathBuf::from("/tmp/assistant-note.parchmint"), 281);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let state = install_fixture_workspace(&mut desktop, window);
+        let selection = EditorSelection::new(0.into(), 5.into());
+        let (adapter, binding, request) = clipboard_fixture(
+            "<p>Harbor words</p>",
+            selection,
+            MountedEditorClipboardIntent::Copy,
+        );
+        let document = parchmint_domain::DocumentId::from_bytes([53; 16]);
+        state.project.editor = Some(adapter.clone());
+        state.editor_bindings.insert(EditorPane::Primary, binding);
+        state
+            .mounted_documents
+            .insert(EditorPane::Primary, document);
+        state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .editor_mut()
+            .update(crate::EditorMessage::OpenTab {
+                pane: EditorPane::Primary,
+                tab: crate::TabSpec::new(stable_id_string(document.as_bytes()), "Harbor"),
+            });
+        let origin = crate::project_workspace::AssistantNoteOrigin {
+            document,
+            session: request.editor_session.clone(),
+            view: request.view,
+            revision: request.revision,
+            selection,
+        };
+        let created =
+            NativeDesktop::create_assistant_note(state, &origin, "Check the harbor").unwrap();
+        let projection =
+            block_on(adapter.project(request.editor_session.clone(), EditorRevision::from(1)))
+                .unwrap();
+        assert_eq!(projection.comments().len(), 1);
+        assert_eq!(
+            stable_id_string(projection.comments()[0].id.as_bytes()),
+            created
+        );
+        assert!(NativeDesktop::create_assistant_note(state, &origin, "Do not duplicate").is_err());
+        assert_eq!(
+            block_on(adapter.project(request.editor_session.clone(), EditorRevision::from(1)))
+                .unwrap()
+                .comments()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -15752,11 +19400,7 @@ mod tests {
                 callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
             });
             let id = desktop.project_windows[&project.window];
-            for panel in [
-                SidebarPanel::Explorer,
-                SidebarPanel::Inspector,
-                SidebarPanel::Editor,
-            ] {
+            for panel in [SidebarPanel::Explorer, SidebarPanel::Inspector] {
                 let NativeWindow::Project(state) = desktop.windows.get_mut(&id).unwrap() else {
                     unreachable!()
                 };
@@ -16119,6 +19763,7 @@ mod tests {
             window,
             mutation: None,
             target: Some((EditorPane::Primary, mount_generation)),
+            draft_mount: None,
             result: Ok(EditorEffectCompletion::Intent(
                 EditorRuntimeIntent::RestoreFocus { view },
             )),
@@ -16964,6 +20609,51 @@ mod tests {
         assert!(adapter.revision(retained).is_err());
         assert!(state.editor_bindings.is_empty());
         assert!(state.retained_editor_sessions.is_empty());
+    }
+
+    #[test]
+    fn clean_unmounted_sessions_are_kept_only_for_open_tabs() {
+        let project = legacy_project(PathBuf::from("/tmp/session-tab-retention.parchmint"), 121);
+        let (mut desktop, _) = NativeDesktop::boot(NativeDesktopStartup {
+            appearance: ResolvedAppearance::Light,
+            appearance_mode: AppearanceMode::System,
+            recent_projects: Vec::new(),
+            projects: vec![project.clone()],
+            locked_project: None,
+            capture: None,
+            callbacks: Arc::new(RecordingCallbacks::opening(NativeProjectOpenResult::Locked)),
+        });
+        let window = desktop.project_windows[&project.window];
+        let adapter = Arc::new(
+            EditorIcedAdapter::new(parchmint_editor_iced::EditorIcedConfig::default()).unwrap(),
+        );
+        let open_document = parchmint_domain::DocumentId::from_bytes([121; 16]);
+        let closed_document = parchmint_domain::DocumentId::from_bytes([122; 16]);
+        let open_session =
+            block_on(adapter.open(CanonicalDocumentLoad::new(open_document, "open")));
+        let closed_session =
+            block_on(adapter.open(CanonicalDocumentLoad::new(closed_document, "closed")));
+        let state = install_fixture_workspace(&mut desktop, window);
+        state.project.editor = Some(adapter.clone());
+        state
+            .workspace
+            .as_mut()
+            .unwrap()
+            .editor_mut()
+            .update(crate::EditorMessage::OpenTab {
+                pane: EditorPane::Primary,
+                tab: crate::TabSpec::new(stable_id_string(open_document.as_bytes()), "Open"),
+            });
+        state
+            .retained_editor_sessions
+            .insert(open_document, open_session.clone());
+        state
+            .retained_editor_sessions
+            .insert(closed_document, closed_session.clone());
+        NativeDesktop::prune_durable_unmounted_sessions(state);
+        assert!(adapter.revision(open_session).is_ok());
+        assert!(adapter.revision(closed_session).is_err());
+        NativeDesktop::teardown_editor_sessions(state);
     }
 
     #[test]

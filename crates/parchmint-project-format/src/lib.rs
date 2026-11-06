@@ -4,6 +4,8 @@
 //! represented safely and portably is rejected before it reaches a canonical
 //! project resource.
 
+pub use parchmint_domain::MAX_RESEARCH_ORIGINAL_BYTES;
+mod continuity_format;
 use parchmint_domain::encode_stable_id as stable_id_text;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -18,12 +20,13 @@ use parchmint_contracts::{
 use parchmint_domain::{
     CheckpointId, DeletedNodeSnapshot, DeletionTombstone, DocumentId as DomainDocumentId, NodeId,
     NodeKind, Project, ProjectExportSetting, ProjectExportSettings, ProjectId, ProjectNode,
-    ProjectSection, StyleCatalog, StyleDefinition, StyleId, StyleProperties, StyleRole,
-    TextAlignment,
+    ProjectSection, ResearchOriginal, ResearchSourceId, StyleCatalog, StyleDefinition, StyleId,
+    StyleProperties, StyleRole, TextAlignment,
 };
 use sha2::{Digest, Sha256};
 
 const FORMAT_CONTROL_V1: &[u8] = b"1\n";
+const FORMAT_CONTROL_V2: &[u8] = b"2\n";
 const ANNOTATION_SCHEMA_V1: &str = "parchmint.annotation-sidecar/v1";
 
 /// Stable identity assigned to a document in a manifest without a structure
@@ -42,6 +45,7 @@ pub fn legacy_document_id(path: &CanonicalRelativePath) -> DomainDocumentId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FormatVersion {
     V1,
+    V2,
 }
 
 impl FormatVersion {
@@ -49,6 +53,7 @@ impl FormatVersion {
     pub const fn control_bytes(self) -> &'static [u8] {
         match self {
             Self::V1 => FORMAT_CONTROL_V1,
+            Self::V2 => FORMAT_CONTROL_V2,
         }
     }
 }
@@ -160,6 +165,30 @@ impl CanonicalRelativePath {
         &self.0
     }
 
+    /// Reserved opaque Research originals use stable IDs, never a supplied
+    /// filename. Their bytes must not undergo text canonicalization.
+    pub fn is_research_original(&self) -> bool {
+        self.0
+            .strip_prefix("research/originals/")
+            .and_then(|name| name.strip_suffix(".bin"))
+            .is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+    }
+
+    /// Returns the stable source identity encoded in a reserved original path.
+    pub fn research_original_id(&self) -> Option<&str> {
+        self.is_research_original().then(|| {
+            self.0
+                .strip_prefix("research/originals/")
+                .and_then(|name| name.strip_suffix(".bin"))
+                .expect("original path was validated")
+        })
+    }
+
     fn unsafe_path<T>(path: &str, reason: &'static str) -> Result<T, FormatError> {
         Err(FormatError::UnsafePath {
             path: path.to_owned(),
@@ -207,6 +236,10 @@ pub enum ResourceId {
     },
     Annotations {
         document_id: String,
+    },
+    /// Opaque bytes belonging to one imported source.
+    ResearchOriginal {
+        source_id: String,
     },
 }
 
@@ -358,6 +391,31 @@ impl CanonicalAnnotations {
     }
 }
 
+/// A source original is opaque: the codec never rewrites its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalResearchOriginal {
+    path: CanonicalRelativePath,
+    bytes: Vec<u8>,
+}
+
+impl CanonicalResearchOriginal {
+    pub fn new(path: CanonicalRelativePath, bytes: Vec<u8>) -> Result<Self, FormatError> {
+        if !path.is_research_original() {
+            return Err(FormatError::UnsupportedResource {
+                path: path.to_string(),
+            });
+        }
+        Ok(Self { path, bytes })
+    }
+
+    pub fn path(&self) -> &CanonicalRelativePath {
+        &self.path
+    }
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
 /// Every canonical value that can be encoded by [`CanonicalCodec`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanonicalResource {
@@ -365,6 +423,7 @@ pub enum CanonicalResource {
     Manifest(CanonicalManifest),
     Styles(CanonicalStyles),
     Dictionary(CanonicalDictionary),
+    ResearchOriginal(CanonicalResearchOriginal),
     Document(CanonicalDocument),
     Annotations(CanonicalAnnotations),
 }
@@ -387,6 +446,7 @@ pub struct ProjectModel {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CanonicalProjectPathMap {
     pub documents: BTreeMap<DomainDocumentId, CanonicalRelativePath>,
+    pub research_originals: BTreeMap<ResearchSourceId, CanonicalRelativePath>,
 }
 
 /// Revision frontier represented by the canonical files in one completed save.
@@ -442,6 +502,8 @@ pub struct CanonicalDomainUpdate {
     pub styles: bool,
     pub dictionary: bool,
     pub documents: BTreeMap<DomainDocumentId, CanonicalDocumentUpdate>,
+    /// Newly introduced immutable source bytes, keyed by their stable source ID.
+    pub research_originals: BTreeMap<ResearchSourceId, Vec<u8>>,
 }
 
 /// Identity and hash of one resource in a complete durable canonical baseline.
@@ -477,13 +539,91 @@ pub struct ProjectFormatCodec {
 }
 
 impl ProjectFormatCodec {
+    /// Decodes one already-authorized original resource without transforming its
+    /// bytes. Project-level callers must validate its manifest reference.
+    pub fn decode_research_original(
+        &self,
+        path: CanonicalRelativePath,
+        bytes: Vec<u8>,
+    ) -> Result<CanonicalResearchOriginal, FormatError> {
+        CanonicalResearchOriginal::new(path, bytes)
+    }
+
+    /// Checks the complete set of original files against their declarations.
+    pub fn validate_research_originals(
+        &self,
+        project: &Project,
+        paths: &CanonicalProjectPathMap,
+        resources: &BTreeMap<CanonicalRelativePath, Vec<u8>>,
+    ) -> Result<(), FormatError> {
+        if paths.research_originals.len() != project.research_originals.len() {
+            return Err(FormatError::InvalidManifest(
+                "research original paths do not match their declarations".into(),
+            ));
+        }
+        for (id, path) in &paths.research_originals {
+            if path.research_original_id() != Some(stable_id_text(id.as_bytes()).as_str()) {
+                return Err(FormatError::InvalidManifest(
+                    "research original path does not match its ID".into(),
+                ));
+            }
+            let original = project.research_originals.get(id).ok_or_else(|| {
+                FormatError::InvalidManifest("research original declaration is missing".into())
+            })?;
+            let bytes = resources.get(path).ok_or_else(|| {
+                FormatError::InvalidManifest("research original bytes are missing".into())
+            })?;
+            validate_original_bytes(original, bytes)?;
+        }
+        if resources.keys().any(|path| {
+            path.is_research_original()
+                && !paths
+                    .research_originals
+                    .values()
+                    .any(|declared| declared == path)
+        }) {
+            return Err(FormatError::InvalidManifest(
+                "unreferenced research original".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn decode_manifest(&self, bytes: &[u8]) -> Result<CanonicalManifest, FormatError> {
+        if bytes.len() > 64 * 1024 * 1024 {
+            return Err(FormatError::InvalidManifest(
+                "project manifest is too large".into(),
+            ));
+        }
         let text = utf8(bytes, "project manifest")?;
         let value = text
             .parse::<toml::Table>()
             .map(toml::Value::Table)
             .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
         Ok(CanonicalManifest(value))
+    }
+
+    /// The compatibility marker and continuity extension must change together.
+    pub fn validate_manifest_version(
+        &self,
+        version: FormatVersion,
+        manifest: &CanonicalManifest,
+    ) -> Result<(), FormatError> {
+        let has_continuity = manifest.value().get("parchmint-continuity").is_some();
+        if has_continuity != (version == FormatVersion::V2) {
+            return Err(FormatError::InvalidManifest(
+                "format version and continuity extension disagree".into(),
+            ));
+        }
+        if version == FormatVersion::V2 {
+            self.decode_domain_project(manifest, ProjectId::default())?
+                .ok_or_else(|| {
+                    FormatError::InvalidManifest(
+                        "continuity decisions require project structure".into(),
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     pub fn decode_styles(&self, bytes: &[u8]) -> Result<CanonicalStyles, FormatError> {
@@ -623,8 +763,34 @@ impl ProjectFormatCodec {
             .collect::<Result<_, FormatError>>()?;
         finalize_save_identity(project, &mut frontier);
         let (manifest, paths) = domain_manifest(project, &frontier)?;
+        for (id, path) in &paths.research_originals {
+            let bytes = existing.get(path).ok_or_else(|| {
+                FormatError::InvalidManifest("research original bytes are missing".into())
+            })?;
+            validate_original_bytes(&project.research_originals[id], bytes)?;
+        }
+        if existing.keys().any(|path| {
+            path.is_research_original()
+                && !paths
+                    .research_originals
+                    .values()
+                    .any(|declared| declared == path)
+                && !previous_paths
+                    .research_originals
+                    .values()
+                    .any(|prior| prior == path)
+        }) {
+            return Err(FormatError::InvalidManifest(
+                "unreferenced research original".into(),
+            ));
+        }
         let mut resources = BTreeMap::new();
-        let control = self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?;
+        let version = if project.continuity_enabled {
+            FormatVersion::V2
+        } else {
+            FormatVersion::V1
+        };
+        let control = self.encode(&CanonicalResource::FormatControl(version))?;
         resources.insert(control.path.clone(), control);
         let manifest = self.encode(&CanonicalResource::Manifest(CanonicalManifest(manifest)))?;
         resources.insert(manifest.path.clone(), manifest);
@@ -644,6 +810,11 @@ impl ProjectFormatCodec {
                 path.as_str(),
                 ".parchmint/format-version" | "project.toml" | "dictionary.txt"
             ) || is_document_path(path.as_str())
+                || (path.is_research_original()
+                    && !paths
+                        .research_originals
+                        .values()
+                        .any(|declared| declared == path))
             {
                 continue;
             }
@@ -693,6 +864,13 @@ impl ProjectFormatCodec {
             .filter(|path| !current_paths.contains(*path))
             .cloned()
             .collect();
+        deletions.extend(
+            previous_paths
+                .research_originals
+                .iter()
+                .filter(|(id, path)| paths.research_originals.get(id) != Some(*path))
+                .map(|(_, path)| path.clone()),
+        );
         for path in existing
             .keys()
             .filter(|path| is_annotation_path(path.as_str()))
@@ -791,16 +969,76 @@ impl ProjectFormatCodec {
         finalize_save_identity(project, &mut frontier);
         let (manifest, paths) = domain_manifest(project, &frontier)?;
 
+        if update
+            .research_originals
+            .keys()
+            .any(|id| !paths.research_originals.contains_key(id))
+        {
+            return Err(FormatError::InvalidManifest(
+                "updated research original is not declared".into(),
+            ));
+        }
+        for (id, path) in &paths.research_originals {
+            let expected = &project.research_originals[id];
+            if let Some(bytes) = update.research_originals.get(id) {
+                validate_original_bytes(expected, bytes)?;
+                if baseline.get(path).is_some_and(|metadata| {
+                    metadata.hash != ContentHash::from_bytes(expected.sha256)
+                        || metadata.resource
+                            != (ResourceId::ResearchOriginal {
+                                source_id: stable_id_text(id.as_bytes()),
+                            })
+                }) {
+                    return Err(FormatError::InvalidManifest(
+                        "research originals are immutable".into(),
+                    ));
+                }
+            } else {
+                let metadata = baseline.get(path).ok_or_else(|| {
+                    FormatError::InvalidManifest("durable research original is missing".into())
+                })?;
+                if metadata.resource
+                    != (ResourceId::ResearchOriginal {
+                        source_id: stable_id_text(id.as_bytes()),
+                    })
+                    || metadata.hash != ContentHash::from_bytes(expected.sha256)
+                {
+                    return Err(FormatError::InvalidManifest(
+                        "durable research original does not match its manifest".into(),
+                    ));
+                }
+                if let Some(bytes) = existing.get(path) {
+                    validate_original_bytes(expected, bytes)?;
+                }
+            }
+        }
+        if baseline.keys().any(|path| {
+            path.is_research_original()
+                && !previous_paths
+                    .research_originals
+                    .values()
+                    .any(|declared| declared == path)
+        }) {
+            return Err(FormatError::InvalidManifest(
+                "unreferenced durable research original".into(),
+            ));
+        }
+
         let mut complete_resources = baseline.clone();
         let mut resources = BTreeMap::new();
 
         let control_path = CanonicalRelativePath::parse(".parchmint/format-version")?;
-        if !complete_resources.contains_key(&control_path) {
-            record_patch_resource(
-                self.encode(&CanonicalResource::FormatControl(FormatVersion::V1))?,
-                &mut resources,
-                &mut complete_resources,
-            );
+        let version = if project.continuity_enabled {
+            FormatVersion::V2
+        } else {
+            FormatVersion::V1
+        };
+        let control = self.encode(&CanonicalResource::FormatControl(version))?;
+        if complete_resources
+            .get(&control_path)
+            .is_none_or(|metadata| metadata.hash != control.hash)
+        {
+            record_patch_resource(control, &mut resources, &mut complete_resources);
         }
 
         let manifest_path = CanonicalRelativePath::parse("project.toml")?;
@@ -808,6 +1046,8 @@ impl ProjectFormatCodec {
             || update.styles
             || update.dictionary
             || !update.documents.is_empty()
+            || !update.research_originals.is_empty()
+            || paths.research_originals != previous_paths.research_originals
             || !complete_resources.contains_key(&manifest_path)
         {
             record_patch_resource(
@@ -871,6 +1111,16 @@ impl ProjectFormatCodec {
             );
         }
 
+        for (id, bytes) in &update.research_originals {
+            let path = paths.research_originals[id].clone();
+            let original = CanonicalResearchOriginal::new(path, bytes.clone())?;
+            record_patch_resource(
+                self.encode(&CanonicalResource::ResearchOriginal(original))?,
+                &mut resources,
+                &mut complete_resources,
+            );
+        }
+
         let current_paths = paths.documents.values().cloned().collect::<BTreeSet<_>>();
         let mut deletions = previous_paths
             .documents
@@ -880,6 +1130,13 @@ impl ProjectFormatCodec {
             })
             .map(|(_, path)| path.clone())
             .collect::<Vec<_>>();
+        deletions.extend(
+            previous_paths
+                .research_originals
+                .iter()
+                .filter(|(id, path)| paths.research_originals.get(id) != Some(*path))
+                .map(|(_, path)| path.clone()),
+        );
         for (document, path) in &paths.documents {
             if !complete_resources.contains_key(path) {
                 return Err(FormatError::InvalidDocument(format!(
@@ -966,6 +1223,17 @@ fn record_patch_resource(
     resources.insert(encoded.path.clone(), encoded);
 }
 
+fn validate_original_bytes(original: &ResearchOriginal, bytes: &[u8]) -> Result<(), FormatError> {
+    if u64::try_from(bytes.len()).ok() != Some(original.byte_length)
+        || ContentHash::of_bytes(bytes).as_bytes() != &original.sha256
+    {
+        return Err(FormatError::InvalidManifest(
+            "research original does not match its manifest".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn finalize_save_identity(project: &Project, frontier: &mut CanonicalPersistenceFrontier) {
     let mut identity = Sha256::new();
     identity.update(frontier.recovery_project_revision.to_be_bytes());
@@ -1013,6 +1281,9 @@ fn domain_manifest(
         toml::Value::Boolean(project.export_settings.starts_new_page),
     );
     root.insert("project".into(), toml::Value::Table(project_table));
+    if let Some(continuity) = continuity_format::encode(project)? {
+        root.insert("parchmint-continuity".into(), continuity);
+    }
 
     let mut structure = toml::map::Map::new();
     structure.insert("version".into(), toml::Value::Integer(1));
@@ -1022,6 +1293,46 @@ fn domain_manifest(
         encode_node_children(project, section.root_id(), section, &mut nodes, &mut paths)?;
     }
     structure.insert("nodes".into(), toml::Value::Array(nodes));
+    if !project.research_originals.is_empty() {
+        let mut originals = Vec::new();
+        for (id, original) in &project.research_originals {
+            let mut value = toml::map::Map::new();
+            let id_text = stable_id_text(id.as_bytes());
+            let path = CanonicalRelativePath::parse(format!("research/originals/{id_text}.bin"))?;
+            value.insert("id".into(), toml::Value::String(id_text));
+            value.insert(
+                "document-id".into(),
+                toml::Value::String(stable_id_text(original.document.as_bytes())),
+            );
+            value.insert("path".into(), toml::Value::String(path.as_str().to_owned()));
+            value.insert(
+                "filename".into(),
+                toml::Value::String(original.filename.clone()),
+            );
+            value.insert(
+                "media-type".into(),
+                toml::Value::String(original.media_type.clone()),
+            );
+            if let Some(url) = &original.source_url {
+                value.insert("source-url".into(), toml::Value::String(url.clone()));
+            }
+            value.insert(
+                "retrieved-at".into(),
+                toml::Value::Integer(original.retrieved_at_unix_seconds as i64),
+            );
+            value.insert(
+                "byte-length".into(),
+                toml::Value::Integer(original.byte_length as i64),
+            );
+            value.insert(
+                "sha256".into(),
+                toml::Value::String(hex_text(&original.sha256)),
+            );
+            paths.research_originals.insert(*id, path);
+            originals.push(toml::Value::Table(value));
+        }
+        structure.insert("research-originals".into(), toml::Value::Array(originals));
+    }
     structure.insert(
         "deletions".into(),
         toml::Value::Array(
@@ -1339,6 +1650,7 @@ fn encode_node_children(
                 );
                 let directory = match section {
                     ProjectSection::Manuscript => "manuscript",
+                    ProjectSection::Lore => "lore",
                     ProjectSection::Research => "research",
                     ProjectSection::Unfiled => "unfiled",
                 };
@@ -1376,6 +1688,7 @@ fn encode_deletion_tombstone(tombstone: &DeletionTombstone) -> Result<toml::Valu
         toml::Value::String(
             match tombstone.section {
                 ProjectSection::Manuscript => "manuscript",
+                ProjectSection::Lore => "lore",
                 ProjectSection::Research => "research",
                 ProjectSection::Unfiled => "unfiled",
             }
@@ -1484,6 +1797,7 @@ fn encode_node_kind(value: &mut toml::Table, kind: NodeKind) {
                 toml::Value::String(
                     match section {
                         ProjectSection::Manuscript => "manuscript",
+                        ProjectSection::Lore => "lore",
                         ProjectSection::Research => "research",
                         ProjectSection::Unfiled => "unfiled",
                     }
@@ -1713,6 +2027,58 @@ fn decode_domain_manifest(
             ));
         }
     }
+    if let Some(values) = structure.get("research-originals") {
+        let values = values.as_array().ok_or_else(|| {
+            FormatError::InvalidManifest("research-originals must be an array".into())
+        })?;
+        for value in values {
+            let table = required_table(value, "research original")?;
+            let id = ResearchSourceId::from_bytes(parse_stable_id(required_str(table, "id")?)?);
+            let path = CanonicalRelativePath::parse(required_str(table, "path")?)?;
+            if path.research_original_id() != Some(stable_id_text(id.as_bytes()).as_str()) {
+                return Err(FormatError::InvalidManifest(
+                    "research original path does not match its ID".into(),
+                ));
+            }
+            let number = |field: &'static str| -> Result<u64, FormatError> {
+                table
+                    .get(field)
+                    .and_then(toml::Value::as_integer)
+                    .and_then(|value| u64::try_from(value).ok())
+                    .ok_or_else(|| {
+                        FormatError::InvalidManifest(format!("invalid research original {field}"))
+                    })
+            };
+            let original = ResearchOriginal {
+                document: DomainDocumentId::from_bytes(parse_stable_id(required_str(
+                    table,
+                    "document-id",
+                )?)?),
+                filename: required_str(table, "filename")?.to_owned(),
+                media_type: required_str(table, "media-type")?.to_owned(),
+                source_url: table
+                    .get("source-url")
+                    .map(|value| {
+                        value.as_str().map(str::to_owned).ok_or_else(|| {
+                            FormatError::InvalidManifest(
+                                "invalid research original source URL".into(),
+                            )
+                        })
+                    })
+                    .transpose()?,
+                retrieved_at_unix_seconds: number("retrieved-at")?,
+                byte_length: number("byte-length")?,
+                sha256: *parse_content_hash(required_str(table, "sha256")?)?.as_bytes(),
+            };
+            if project.research_originals.insert(id, original).is_some() {
+                return Err(FormatError::InvalidManifest(
+                    "duplicate research original ID".into(),
+                ));
+            }
+            paths.research_originals.insert(id, path);
+        }
+    }
+    continuity_format::decode(value.get("parchmint-continuity"), &mut project)?;
     project
         .validate()
         .map_err(|error| FormatError::InvalidManifest(error.to_string()))?;
@@ -1864,6 +2230,7 @@ fn decode_node_kind(table: &toml::Table) -> Result<NodeKind, FormatError> {
 fn decode_section(value: &str) -> Result<ProjectSection, FormatError> {
     match value {
         "manuscript" => Ok(ProjectSection::Manuscript),
+        "lore" => Ok(ProjectSection::Lore),
         "research" => Ok(ProjectSection::Research),
         "unfiled" => Ok(ProjectSection::Unfiled),
         _ => Err(FormatError::InvalidManifest(
@@ -1983,6 +2350,11 @@ fn parse_stable_id(value: &str) -> Result<[u8; 16], FormatError> {
 }
 
 fn resource_for_path(path: &CanonicalRelativePath) -> ResourceId {
+    if let Some(source_id) = path.research_original_id() {
+        return ResourceId::ResearchOriginal {
+            source_id: source_id.to_owned(),
+        };
+    }
     match path.as_str() {
         ".parchmint/format-version" => ResourceId::FormatControl,
         "project.toml" => ResourceId::Manifest,
@@ -2004,6 +2376,8 @@ impl CanonicalCodec for ProjectFormatCodec {
     fn detect(&self, control: &[u8]) -> Result<FormatVersion, FormatError> {
         if control == FORMAT_CONTROL_V1 {
             Ok(FormatVersion::V1)
+        } else if control == FORMAT_CONTROL_V2 {
+            Ok(FormatVersion::V2)
         } else {
             Err(FormatError::InvalidFormatControl)
         }
@@ -2023,8 +2397,36 @@ impl CanonicalCodec for ProjectFormatCodec {
             return Err(FormatError::MissingManifest);
         }
 
+        let manifest_path = CanonicalRelativePath::parse("project.toml")?;
+        let manifest = self.decode_manifest(&input.resources[&manifest_path])?;
+        self.validate_manifest_version(format_version, &manifest)?;
+        let has_original_declarations = manifest
+            .value()
+            .get("parchmint-structure")
+            .and_then(|value| value.get("research-originals"))
+            .is_some();
+        let mut originals = BTreeMap::new();
+        if has_original_declarations {
+            let (project, paths) = self
+                .decode_domain_project(&manifest, ProjectId::default())?
+                .ok_or_else(|| {
+                    FormatError::InvalidManifest(
+                        "research originals require a project structure".into(),
+                    )
+                })?;
+            self.validate_research_originals(&project, &paths, &input.resources)?;
+            for path in paths.research_originals.into_values() {
+                originals.insert(path, ());
+            }
+        }
+
         let mut resources = BTreeMap::new();
         for (path, bytes) in input.resources {
+            if path.is_research_original() && originals.contains_key(&path) {
+                let original = self.decode_research_original(path.clone(), bytes)?;
+                resources.insert(path, CanonicalResource::ResearchOriginal(original));
+                continue;
+            }
             let resource = match path.as_str() {
                 "project.toml" => CanonicalResource::Manifest(self.decode_manifest(&bytes)?),
                 "styles.css" => CanonicalResource::Styles(self.decode_styles(&bytes)?),
@@ -2114,6 +2516,17 @@ impl CanonicalCodec for ProjectFormatCodec {
                 CanonicalRelativePath::parse("dictionary.txt")?,
                 render_dictionary(dictionary).into_bytes(),
             ),
+            CanonicalResource::ResearchOriginal(original) => (
+                ResourceId::ResearchOriginal {
+                    source_id: original
+                        .path
+                        .research_original_id()
+                        .expect("validated original path")
+                        .to_owned(),
+                },
+                original.path.clone(),
+                original.bytes.clone(),
+            ),
             CanonicalResource::Document(document) => (
                 ResourceId::Document,
                 CanonicalRelativePath::parse("manuscript/document.html")?,
@@ -2159,6 +2572,7 @@ fn validate_paths<'a>(
 
 fn is_document_path(path: &str) -> bool {
     (path.starts_with("manuscript/")
+        || path.starts_with("lore/")
         || path.starts_with("research/")
         || path.starts_with("unfiled/"))
         && path.ends_with(".html")
@@ -3383,6 +3797,351 @@ fn collapse_whitespace(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn opaque_research_original_paths_require_a_lowercase_stable_id() {
+        use super::CanonicalRelativePath;
+        let path = |value: &str| {
+            CanonicalRelativePath::parse(value)
+                .unwrap()
+                .is_research_original()
+        };
+        assert!(path(
+            "research/originals/0123456789abcdef0123456789abcdef.bin"
+        ));
+        assert!(!path(
+            "research/originals/0123456789abcdef0123456789abcdeF.bin"
+        ));
+        assert!(!path(
+            "research/originals/nested/0123456789abcdef0123456789abcdef.bin"
+        ));
+        assert!(!path(
+            "research/originals/0123456789abcdef0123456789abcdef.html"
+        ));
+        assert!(!path("research/originals/too-short.bin"));
+    }
+
+    #[test]
+    fn research_original_codec_preserves_arbitrary_bytes_and_identity() {
+        use super::*;
+        let path =
+            CanonicalRelativePath::parse("research/originals/0123456789abcdef0123456789abcdef.bin")
+                .unwrap();
+        let bytes = b"source\r\n\x00\xff\r\n".to_vec();
+        let original = CanonicalResearchOriginal::new(path.clone(), bytes.clone()).unwrap();
+        let codec = ProjectFormatCodec::default();
+        let encoded = codec
+            .encode(&CanonicalResource::ResearchOriginal(original))
+            .unwrap();
+        assert_eq!(encoded.bytes, bytes);
+        assert_eq!(encoded.path, path);
+        assert_eq!(
+            encoded.resource,
+            ResourceId::ResearchOriginal {
+                source_id: "0123456789abcdef0123456789abcdef".into()
+            }
+        );
+        let input = CanonicalInputSet {
+            format_control: Some(FormatVersion::V1.control_bytes().to_vec()),
+            resources: BTreeMap::from([
+                (
+                    CanonicalRelativePath::parse("project.toml").unwrap(),
+                    b"title = \"Test\"\n".to_vec(),
+                ),
+                (path.clone(), bytes.clone()),
+            ]),
+        };
+        assert!(matches!(
+            codec.decode_project(input),
+            Err(FormatError::UnsupportedResource { .. })
+        ));
+        let decoded = codec
+            .decode_research_original(path.clone(), bytes.clone())
+            .unwrap();
+        assert_eq!(
+            codec
+                .encode(&CanonicalResource::ResearchOriginal(decoded))
+                .unwrap()
+                .bytes,
+            bytes
+        );
+        assert!(
+            CanonicalResearchOriginal::new(
+                CanonicalRelativePath::parse("research/unsafe.bin").unwrap(),
+                Vec::new()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn declared_original_round_trips_and_rejects_missing_changed_or_unlisted_bytes() {
+        use parchmint_domain::{ProjectCommand, apply_project_command};
+        let project_id = ProjectId::from_bytes([71; 16]);
+        let document = DomainDocumentId::from_bytes([72; 16]);
+        let source = ResearchSourceId::from_bytes([73; 16]);
+        let base = Project::new(project_id);
+        let mut project = apply_project_command(
+            &base,
+            base.revision,
+            ProjectCommand::create_document(
+                NodeId::from_bytes([74; 16]),
+                document,
+                NodeId::research_root(),
+                0,
+                "Source",
+            ),
+        )
+        .unwrap()
+        .project;
+        let bytes = b"\0\xfforiginal\r\n".to_vec();
+        project.research_originals.insert(
+            source,
+            ResearchOriginal {
+                document,
+                filename: "original.pdf".into(),
+                media_type: "application/pdf".into(),
+                source_url: Some("https://example.com/original.pdf".into()),
+                retrieved_at_unix_seconds: 123,
+                byte_length: bytes.len() as u64,
+                sha256: *ContentHash::of_bytes(&bytes).as_bytes(),
+            },
+        );
+        let path = CanonicalRelativePath::parse(format!(
+            "research/originals/{}.bin",
+            stable_id_text(source.as_bytes())
+        ))
+        .unwrap();
+        let existing = BTreeMap::from([(path.clone(), bytes.clone())]);
+        let documents = BTreeMap::from([(document, "<p>Source information</p>".to_owned())]);
+        let encoding = codec()
+            .encode_domain_project(
+                &project,
+                &documents,
+                &existing,
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        let manifest_path = CanonicalRelativePath::parse("project.toml").unwrap();
+        let manifest = codec()
+            .decode_manifest(&encoding.resources[&manifest_path].bytes)
+            .unwrap();
+        let (decoded, paths) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, project);
+        assert_eq!(paths.research_originals[&source], path);
+        assert_eq!(encoding.resources[&path].bytes, bytes);
+        let mut declared_charset = project.clone();
+        declared_charset
+            .research_originals
+            .get_mut(&source)
+            .unwrap()
+            .media_type = "text/html; charset=windows-1252".into();
+        let encoded_charset = codec()
+            .encode_domain_project(
+                &declared_charset,
+                &documents,
+                &existing,
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        let manifest = codec()
+            .decode_manifest(&encoded_charset.resources[&manifest_path].bytes)
+            .unwrap();
+        let (decoded_charset, _) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            decoded_charset.research_originals[&source].media_type,
+            "text/html; charset=windows-1252"
+        );
+        assert_eq!(encoded_charset.resources[&path].bytes, bytes);
+        let mut input = CanonicalInputSet {
+            format_control: Some(FormatVersion::V1.control_bytes().to_vec()),
+            resources: encoding
+                .resources
+                .iter()
+                .filter(|(path, _)| path.as_str() != ".parchmint/format-version")
+                .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+                .collect(),
+        };
+        assert!(matches!(
+            codec().decode_project(input.clone()).unwrap().resources[&path],
+            CanonicalResource::ResearchOriginal(_)
+        ));
+        input.resources.insert(path.clone(), b"changed".to_vec());
+        assert!(codec().decode_project(input.clone()).is_err());
+        input.resources.remove(&path);
+        assert!(codec().decode_project(input).is_err());
+        assert!(
+            codec()
+                .encode_domain_project(
+                    &project,
+                    &documents,
+                    &BTreeMap::new(),
+                    &CanonicalProjectPathMap::default()
+                )
+                .is_err()
+        );
+        let mut no_originals = project.clone();
+        no_originals.research_originals.clear();
+        assert!(
+            codec()
+                .encode_domain_project(
+                    &no_originals,
+                    &documents,
+                    &existing,
+                    &CanonicalProjectPathMap::default()
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn original_patches_add_and_remove_atomically_and_never_replace_an_existing_identity() {
+        use parchmint_domain::{ProjectCommand, apply_project_command};
+        let base = Project::new(ProjectId::from_bytes([81; 16]));
+        let document = DomainDocumentId::from_bytes([82; 16]);
+        let mut project = apply_project_command(
+            &base,
+            base.revision,
+            ProjectCommand::create_document(
+                NodeId::from_bytes([83; 16]),
+                document,
+                NodeId::research_root(),
+                0,
+                "Reference",
+            ),
+        )
+        .unwrap()
+        .project;
+        let bodies = BTreeMap::from([(document, "<p>Reference</p>".to_owned())]);
+        let baseline = codec()
+            .encode_domain_project(
+                &project,
+                &bodies,
+                &BTreeMap::new(),
+                &CanonicalProjectPathMap::default(),
+            )
+            .unwrap();
+        let existing = baseline
+            .resources
+            .iter()
+            .map(|(path, resource)| (path.clone(), resource.bytes.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let metadata = baseline
+            .resources
+            .iter()
+            .map(|(path, resource)| {
+                (
+                    path.clone(),
+                    CanonicalResourceMetadata {
+                        resource: resource.resource.clone(),
+                        hash: resource.hash,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let id = ResearchSourceId::from_bytes([84; 16]);
+        let bytes = b"\0original\r\n\xff".to_vec();
+        project.research_originals.insert(
+            id,
+            ResearchOriginal {
+                document,
+                filename: "source.pdf".into(),
+                media_type: "application/pdf".into(),
+                source_url: None,
+                retrieved_at_unix_seconds: 1,
+                byte_length: bytes.len() as u64,
+                sha256: *ContentHash::of_bytes(&bytes).as_bytes(),
+            },
+        );
+        let update = CanonicalDomainUpdate {
+            research_originals: BTreeMap::from([(id, bytes.clone())]),
+            ..Default::default()
+        };
+        let transition = CanonicalPersistenceFrontierTransition {
+            previous: &baseline.persistence_frontier,
+            next: &baseline.persistence_frontier,
+        };
+        let added = codec()
+            .encode_domain_project_patch(
+                &project,
+                &update,
+                &existing,
+                &metadata,
+                &baseline.paths,
+                transition,
+            )
+            .unwrap();
+        let path = added.paths.research_originals[&id].clone();
+        assert_eq!(added.resources[&path].bytes, bytes);
+        assert!(
+            added
+                .resources
+                .contains_key(&CanonicalRelativePath::parse("project.toml").unwrap())
+        );
+        let mut current = existing.clone();
+        current.extend(
+            added
+                .resources
+                .iter()
+                .map(|(path, resource)| (path.clone(), resource.bytes.clone())),
+        );
+        let mut changed = project.clone();
+        changed.research_originals.get_mut(&id).unwrap().sha256 =
+            *ContentHash::of_bytes(b"changed").as_bytes();
+        changed.research_originals.get_mut(&id).unwrap().byte_length = 7;
+        let changed_update = CanonicalDomainUpdate {
+            research_originals: BTreeMap::from([(id, b"changed".to_vec())]),
+            ..Default::default()
+        };
+        let transition = CanonicalPersistenceFrontierTransition {
+            previous: &added.persistence_frontier,
+            next: &added.persistence_frontier,
+        };
+        assert!(
+            codec()
+                .encode_domain_project_patch(
+                    &changed,
+                    &changed_update,
+                    &current,
+                    &added.complete_resources,
+                    &added.paths,
+                    transition
+                )
+                .is_err()
+        );
+        project.research_originals.remove(&id);
+        let transition = CanonicalPersistenceFrontierTransition {
+            previous: &added.persistence_frontier,
+            next: &added.persistence_frontier,
+        };
+        let removed = codec()
+            .encode_domain_project_patch(
+                &project,
+                &CanonicalDomainUpdate::default(),
+                &current,
+                &added.complete_resources,
+                &added.paths,
+                transition,
+            )
+            .unwrap();
+        assert!(removed.deletions.contains(&path));
+        assert!(!removed.complete_resources.contains_key(&path));
+        assert!(
+            removed
+                .resources
+                .contains_key(&CanonicalRelativePath::parse("project.toml").unwrap())
+        );
+        let full = codec()
+            .encode_domain_project(&project, &bodies, &current, &added.paths)
+            .unwrap();
+        assert!(full.deletions.contains(&path));
+        assert!(!full.resources.contains_key(&path));
+    }
     use super::*;
 
     fn codec() -> ProjectFormatCodec {
@@ -3834,6 +4593,49 @@ mod tests {
     }
 
     #[test]
+    fn lore_documents_round_trip_with_stable_identity_and_path() {
+        use parchmint_domain::{ProjectCommand, apply_project_command};
+        let project_id = ProjectId::from_bytes([91; 16]);
+        let node = NodeId::from_bytes([92; 16]);
+        let document = DomainDocumentId::from_bytes([93; 16]);
+        let empty = Project::new(project_id);
+        let project = apply_project_command(
+            &empty,
+            empty.revision,
+            ProjectCommand::create_document(node, document, NodeId::lore_root(), 0, "Mara"),
+        )
+        .unwrap()
+        .project;
+        let bodies = BTreeMap::from([(document, "<p>Mara is a pilot.</p>".to_owned())]);
+        let encoding = codec()
+            .encode_domain_project_with_frontier(
+                &project,
+                &bodies,
+                &BTreeMap::new(),
+                &CanonicalProjectPathMap::default(),
+                &CanonicalPersistenceFrontier::default(),
+            )
+            .unwrap();
+        assert!(
+            encoding.paths.documents[&document]
+                .as_str()
+                .starts_with("lore/")
+        );
+        let manifest = codec()
+            .decode_manifest(
+                &encoding.resources[&CanonicalRelativePath::parse("project.toml").unwrap()].bytes,
+            )
+            .unwrap();
+        let (decoded, paths) = codec()
+            .decode_domain_project(&manifest, project_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, project);
+        assert_eq!(paths, encoding.paths);
+        assert_eq!(decoded.nodes.section(node), Some(ProjectSection::Lore));
+    }
+
+    #[test]
     fn unfiled_documents_round_trip_and_move_without_changing_identity() {
         use parchmint_domain::{ProjectCommand, apply_project_command};
         let project_id = ProjectId::from_bytes([1; 16]);
@@ -3955,6 +4757,7 @@ mod tests {
         let previous_path = CanonicalRelativePath::parse("manuscript/old-name.html").unwrap();
         let previous = CanonicalProjectPathMap {
             documents: BTreeMap::from([(document, previous_path.clone())]),
+            ..CanonicalProjectPathMap::default()
         };
         let documents = BTreeMap::from([(document, "<p>Body</p>".to_owned())]);
         let frontier = CanonicalPersistenceFrontier {

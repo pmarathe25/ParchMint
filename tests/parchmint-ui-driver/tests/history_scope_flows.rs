@@ -32,7 +32,7 @@ fn open_document_history(harness: &DesktopInteractionHarness, title: &str) {
 }
 
 #[test]
-fn explicit_document_history_restores_only_that_document_and_preserves_other_pane_undo() {
+fn explicit_document_history_restores_only_that_document_and_preserves_other_document_undo() {
     let run = IsolatedRun::new("document-history").unwrap();
     let project = run.root().join("novel.parchmint");
     let harness = create_project(&run, &project, "Document History");
@@ -51,19 +51,15 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
         .active_editor_document_id(EditorPane::Primary)
         .unwrap();
     create_document(&harness, "Research", "Notes");
-    let note = harness.hierarchy_node("Notes").unwrap();
-    harness
-        .drag_hierarchy_node_to_pane(HarnessWindow::Project, note, EditorPane::Companion)
-        .unwrap();
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "The original notes.",
         )
         .unwrap();
     let notes = harness
-        .active_editor_document_id(EditorPane::Companion)
+        .active_editor_document_id(EditorPane::Primary)
         .unwrap();
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
@@ -100,10 +96,11 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
             " New chapter writing.",
         )
         .unwrap();
+    harness.click_text(HarnessWindow::Project, "Notes").unwrap();
     harness
         .type_into_target(
             HarnessWindow::Project,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             " Unrelated notes must stay.",
         )
         .unwrap();
@@ -140,7 +137,7 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
         std::fs::read_to_string(project.join(format!("research/{notes}.html"))).unwrap();
     assert!(
         saved_notes.contains("Unrelated notes must stay."),
-        "restoration must save the other pane's latest edits before reporting success"
+        "restoration must save the other document's latest edits before reporting success"
     );
     assert!(
         harness
@@ -151,17 +148,14 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
     );
 
     route(&harness, RibbonDestination::Editor);
+    harness
+        .click_text(HarnessWindow::Project, "Chapter")
+        .unwrap();
     assert_eq!(
         harness
             .active_editor_document_id(EditorPane::Primary)
             .unwrap(),
         chapter
-    );
-    assert_eq!(
-        harness
-            .active_editor_document_id(EditorPane::Companion)
-            .unwrap(),
-        notes
     );
     harness
         .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
@@ -169,9 +163,7 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
     let body = harness.active_editor_body().unwrap();
     assert!(body.contains("The original chapter."));
     assert!(!body.contains("New chapter writing."));
-    harness
-        .click_target(HarnessWindow::Project, HarnessTarget::EditorCompanion)
-        .unwrap();
+    harness.click_text(HarnessWindow::Project, "Notes").unwrap();
     assert!(
         harness
             .active_editor_body()
@@ -179,13 +171,18 @@ fn explicit_document_history_restores_only_that_document_and_preserves_other_pan
             .contains("Unrelated notes must stay.")
     );
     harness
-        .press_command_key(HarnessWindow::Project, 'z')
+        .click_target(HarnessWindow::Project, HarnessTarget::EditorPrimary)
         .unwrap();
+    if let Err(error) = harness.press_command_key(HarnessWindow::Project, 'z') {
+        let log = std::fs::read_to_string(run.root().join("data/logs/parchmint-debug.log"))
+            .unwrap_or_default();
+        panic!("undo failed: {error:?}\n{log}");
+    }
     let body = harness.active_editor_body().unwrap();
     assert!(body.contains("The original notes."));
     assert!(
         !body.contains("Unrelated notes must stay."),
-        "other pane must retain its undo stack"
+        "the other document must retain its undo stack"
     );
     harness.elapse_autosave_idle().unwrap();
     route(&harness, RibbonDestination::Settings);

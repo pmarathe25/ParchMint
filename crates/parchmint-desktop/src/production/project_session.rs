@@ -943,6 +943,7 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             ProjectFilesystemError::failed("hydrate global dictionary", error.to_string())
         })?;
         let workflows = Arc::new(ProductionProjectWorkflows {
+            project_root: root_path.clone(),
             history: history.clone(),
             persistence: project_persistence.clone(),
             query: query.clone(),
@@ -987,7 +988,18 @@ impl ProjectFilesystemService for ProductionProjectFilesystem {
             self.shared.preferences.clone(),
             self.shared.appearance.clone(),
             self.shared.platform.clone(),
-        );
+        )
+        .with_assistant(Arc::new(super::assistant_workflow::ProductionAssistant {
+            query: query.clone(),
+            preferences: self.shared.preferences.clone(),
+            platform: self.shared.platform.clone(),
+            budget: self.shared.assistant_budget.clone(),
+            conversations: Some(super::assistant_conversations::ConversationStore::open(
+                &self.shared.assistant_conversations_dir,
+                project_id.as_bytes(),
+                &root_path,
+            )),
+        }));
 
         self.shared
             .controls
@@ -1088,7 +1100,7 @@ fn canonical_resources(
             }
         }
     }
-    for directory in ["manuscript", "research", "unfiled", "annotations"] {
+    for directory in ["manuscript", "lore", "research", "unfiled", "annotations"] {
         collect_canonical_paths(root_path, &root_path.join(directory), &mut paths)?;
     }
     paths.sort();
@@ -1102,12 +1114,15 @@ fn canonical_resources(
         .into_iter()
         .filter(|path| !is_document_resource(path))
         .map(|path| {
-            files
-                .read(root, &path)
-                .map(|bytes| (path, bytes))
-                .map_err(|error| {
-                    ProjectFilesystemError::failed("read canonical resource", error.to_string())
-                })
+            (if path.is_research_original() {
+                files.read_bounded(root, &path, parchmint_domain::MAX_RESEARCH_ORIGINAL_BYTES)
+            } else {
+                files.read(root, &path)
+            })
+            .map(|bytes| (path, bytes))
+            .map_err(|error| {
+                ProjectFilesystemError::failed("read canonical resource", error.to_string())
+            })
         })
         .collect::<Result<_, _>>()?;
     Ok(CanonicalOpenResources {
@@ -1168,8 +1183,12 @@ fn collect_canonical_paths(
 }
 
 fn is_canonical_resource(path: &CanonicalRelativePath) -> bool {
+    if path.is_research_original() {
+        return true;
+    }
     let path = path.as_str();
     ((path.starts_with("manuscript/")
+        || path.starts_with("lore/")
         || path.starts_with("research/")
         || path.starts_with("unfiled/"))
         && path.ends_with(".html"))
@@ -1329,6 +1348,20 @@ fn application_state(
         let manifest = codec.decode_manifest(manifest).map_err(|error| {
             ProjectFilesystemError::failed("decode project manifest", error.to_string())
         })?;
+        let control = resources
+            .metadata
+            .get(&CanonicalRelativePath::parse(".parchmint/format-version").expect("static path"))
+            .ok_or_else(|| {
+                ProjectFilesystemError::failed("decode project format", "format control is missing")
+            })?;
+        let version = codec.detect(control).map_err(|error| {
+            ProjectFilesystemError::failed("decode project format", error.to_string())
+        })?;
+        codec
+            .validate_manifest_version(version, &manifest)
+            .map_err(|error| {
+                ProjectFilesystemError::failed("decode project format", error.to_string())
+            })?;
         persistence_frontier = codec
             .decode_persistence_frontier(&manifest)
             .map_err(|error| {
@@ -1376,6 +1409,11 @@ fn application_state(
             })?;
         }
     }
+    codec
+        .validate_research_originals(&project, &canonical_paths, &resources.metadata)
+        .map_err(|error| {
+            ProjectFilesystemError::failed("validate research originals", error.to_string())
+        })?;
     let discovered = resources
         .document_paths
         .iter()
@@ -1384,6 +1422,7 @@ fn application_state(
     if canonical_paths.documents.is_empty() {
         let mut section_counts = BTreeMap::from([
             (NodeId::manuscript_root(), 0usize),
+            (NodeId::lore_root(), 0usize),
             (NodeId::research_root(), 0usize),
             (NodeId::unfiled_root(), 0usize),
         ]);
@@ -1393,6 +1432,8 @@ fn application_state(
             let node_id = NodeId::from_bytes(stable_id(b"node", path.as_str().as_bytes()));
             let parent = if path.as_str().starts_with("unfiled/") {
                 NodeId::unfiled_root()
+            } else if path.as_str().starts_with("lore/") {
+                NodeId::lore_root()
             } else if path.as_str().starts_with("research/") {
                 NodeId::research_root()
             } else {
@@ -1467,6 +1508,7 @@ fn application_state(
     }
     let mut document_order = Vec::new();
     append_document_ids(&project, NodeId::manuscript_root(), &mut document_order);
+    append_document_ids(&project, NodeId::lore_root(), &mut document_order);
     append_document_ids(&project, NodeId::research_root(), &mut document_order);
     append_document_ids(&project, NodeId::unfiled_root(), &mut document_order);
     let summaries = document_order
@@ -1567,35 +1609,44 @@ fn recovery_base(
         .collect();
     let mut hashes = BTreeMap::new();
     for (path, bytes) in resources {
-        let resource = match path.as_str() {
-            ".parchmint/format-version" => recovery::ResourceId::FormatControl,
-            "project.toml" => recovery::ResourceId::Manifest,
-            "styles.css" => recovery::ResourceId::Styles,
-            "dictionary.txt" => recovery::ResourceId::Dictionary,
-            path if (path.starts_with("manuscript/")
-                || path.starts_with("research/")
-                || path.starts_with("unfiled/"))
-                && path.ends_with(".html") =>
-            {
-                let document_id = paths
-                    .documents
-                    .iter()
-                    .find_map(|(document, canonical)| {
-                        (canonical.as_str() == path).then_some(*document)
-                    })
-                    .map(|document| stable_id_text(document.as_bytes()))
-                    .unwrap_or_else(|| stable_id_text(&stable_id(b"document", path.as_bytes())));
-                recovery::ResourceId::DocumentById { document_id }
+        let resource = if let Some(source_id) = path.research_original_id() {
+            recovery::ResourceId::ResearchOriginal {
+                source_id: source_id.to_owned(),
             }
-            path if path.starts_with("annotations/") && path.ends_with(".json") => {
-                recovery::ResourceId::Annotations {
-                    document_id: path
-                        .trim_start_matches("annotations/")
-                        .trim_end_matches(".json")
-                        .to_owned(),
+        } else {
+            match path.as_str() {
+                ".parchmint/format-version" => recovery::ResourceId::FormatControl,
+                "project.toml" => recovery::ResourceId::Manifest,
+                "styles.css" => recovery::ResourceId::Styles,
+                "dictionary.txt" => recovery::ResourceId::Dictionary,
+                path if (path.starts_with("manuscript/")
+                    || path.starts_with("lore/")
+                    || path.starts_with("research/")
+                    || path.starts_with("unfiled/"))
+                    && path.ends_with(".html") =>
+                {
+                    let document_id = paths
+                        .documents
+                        .iter()
+                        .find_map(|(document, canonical)| {
+                            (canonical.as_str() == path).then_some(*document)
+                        })
+                        .map(|document| stable_id_text(document.as_bytes()))
+                        .unwrap_or_else(|| {
+                            stable_id_text(&stable_id(b"document", path.as_bytes()))
+                        });
+                    recovery::ResourceId::DocumentById { document_id }
                 }
+                path if path.starts_with("annotations/") && path.ends_with(".json") => {
+                    recovery::ResourceId::Annotations {
+                        document_id: path
+                            .trim_start_matches("annotations/")
+                            .trim_end_matches(".json")
+                            .to_owned(),
+                    }
+                }
+                _ => continue,
             }
-            _ => continue,
         };
         hashes.insert(
             resource,
@@ -1633,6 +1684,7 @@ fn recovery_document_content_hash(
 fn is_document_resource(path: &CanonicalRelativePath) -> bool {
     let path = path.as_str();
     (path.starts_with("manuscript/")
+        || path.starts_with("lore/")
         || path.starts_with("research/")
         || path.starts_with("unfiled/"))
         && path.ends_with(".html")

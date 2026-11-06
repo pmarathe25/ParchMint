@@ -1766,6 +1766,7 @@ pub enum SettingsDetail {
 pub enum SettingsCategory {
     Shortcuts,
     Appearance,
+    AiAssistant,
     Styles,
     Metadata,
     Dictionaries,
@@ -1776,6 +1777,7 @@ impl SettingsCategory {
         match self {
             Self::Shortcuts => "Keyboard shortcuts",
             Self::Appearance => "Appearance",
+            Self::AiAssistant => "AI assistant",
             Self::Styles => "Styles",
             Self::Metadata => "Metadata fields",
             Self::Dictionaries => "Dictionaries",
@@ -2090,9 +2092,10 @@ impl SettingsState {
         true
     }
 
-    pub fn categories(&self) -> [SettingsCategoryItem; 3] {
+    pub fn categories(&self) -> [SettingsCategoryItem; 4] {
         [
             SettingsCategory::Appearance,
+            SettingsCategory::AiAssistant,
             SettingsCategory::Shortcuts,
             SettingsCategory::Dictionaries,
         ]
@@ -4566,9 +4569,529 @@ impl ProjectTaskCompletion {
     }
 }
 
+/// The assistant and the existing annotation surface share one dock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssistantDockTab {
+    Ask,
+    Check,
+    Research,
+    Notes,
+}
+
+pub(crate) const DEFAULT_CHECK_PROMPT: &str = "Check this material for continuity.";
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantTurn {
+    pub(crate) question: String,
+    pub(crate) result: parchmint_ui_api::AssistantWorkflowResult,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AssistantThread {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) auto_title: bool,
+    pub(crate) menu_open: bool,
+    pub(crate) list_open: bool,
+    pub(crate) renaming: bool,
+    pub(crate) rename_draft: String,
+    pub(crate) confirming_delete: bool,
+    pub(crate) draft: String,
+    pub(crate) draft_editor: text_editor::Content,
+    draft_undo: Vec<AssistantDraftRevision>,
+    draft_redo: Vec<AssistantDraftRevision>,
+    pub(crate) turns: Vec<AssistantTurn>,
+    pub(crate) pending: Option<AssistantPending>,
+    /// Transient output for this request, never part of saved conversations.
+    pub(crate) progress: std::sync::Arc<std::sync::Mutex<String>>,
+    pub(crate) error: Option<String>,
+    pub(crate) next_request: u64,
+    pub(crate) note_proposal: Option<String>,
+    pub(crate) edit_proposal: Option<AssistantEditProposal>,
+    pub(crate) interrupted_prompts: Vec<String>,
+    pub(crate) confirming_clear: bool,
+    pub(crate) expanded_context: BTreeSet<usize>,
+    pub(crate) expanded_findings: BTreeSet<(usize, usize)>,
+    pub(crate) context_controls_open: bool,
+    pub(crate) pinned_context: BTreeSet<String>,
+    pub(crate) excluded_context: BTreeSet<String>,
+    pub(crate) context_scope: Option<String>,
+    pub(crate) selection_only: bool,
+    /// One-request consent; never persisted or inherited by a new conversation.
+    pub(crate) explicit_notes: Option<parchmint_ui_api::AssistantExplicitNotes>,
+    pub(crate) research_import: Option<ResearchImportDraft>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantNotesChoice {
+    ByRequest,
+    CurrentDocument,
+    Project,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantContextRule {
+    Pinned,
+    Excluded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResearchImportForm {
+    Summary,
+    SourceLink,
+    Original,
+}
+
+fn research_import_nonce() -> [u8; 16] {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_IMPORT: AtomicU64 = AtomicU64::new(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut seed = Vec::with_capacity(28);
+    seed.extend_from_slice(&now.to_be_bytes());
+    seed.extend_from_slice(&std::process::id().to_be_bytes());
+    seed.extend_from_slice(&NEXT_IMPORT.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    let hash = parchmint_project_format::ContentHash::of_bytes(&seed);
+    let mut nonce = [0; 16];
+    nonce.copy_from_slice(&hash.as_bytes()[..16]);
+    nonce
+}
+
+impl AssistantThread {
+    fn new() -> Self {
+        Self {
+            id: stable_id_string(&research_import_nonce()),
+            title: "New conversation".to_owned(),
+            auto_title: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn clear_draft(&mut self) {
+        self.draft.clear();
+        self.draft_editor = text_editor::Content::new();
+        self.draft_undo.clear();
+        self.draft_redo.clear();
+    }
+}
+
+const ASSISTANT_DRAFT_HISTORY_BYTES: usize = 1024 * 1024;
+const ASSISTANT_DRAFT_HISTORY_ERROR: &str = "This draft is too large to undo safely.";
+
+#[derive(Debug, Clone)]
+struct AssistantDraftRevision {
+    text: String,
+    cursor: text_editor::Cursor,
+}
+
+fn remember_assistant_draft(
+    history: &mut Vec<AssistantDraftRevision>,
+    value: &str,
+    cursor: text_editor::Cursor,
+) {
+    const MAX_HISTORY_ENTRIES: usize = 64;
+    if value.len() > ASSISTANT_DRAFT_HISTORY_BYTES {
+        history.clear();
+        return;
+    }
+    history.push(AssistantDraftRevision {
+        text: value.to_owned(),
+        cursor,
+    });
+    while history.len() > MAX_HISTORY_ENTRIES
+        || history.iter().map(|entry| entry.text.len()).sum::<usize>()
+            > ASSISTANT_DRAFT_HISTORY_BYTES
+    {
+        history.remove(0);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssistantConversationChoice {
+    pub(crate) id: String,
+    pub(crate) label: String,
+}
+
+/// Ephemeral origin for a citation jump; never saved with conversations.
+#[derive(Debug, Clone)]
+pub(crate) enum AssistantReturnLocation {
+    Scratch {
+        tab_id: String,
+    },
+    Document {
+        tab_id: String,
+        document: parchmint_domain::DocumentId,
+        session: parchmint_editor_api::SharedEditorSession,
+        revision: parchmint_editor_api::EditorRevision,
+        selection: parchmint_editor_api::EditorSelection,
+        scroll_y: f32,
+    },
+}
+
+impl AssistantReturnLocation {
+    pub(crate) fn tab_id(&self) -> &str {
+        match self {
+            Self::Scratch { tab_id } | Self::Document { tab_id, .. } => tab_id,
+        }
+    }
+}
+
+impl std::fmt::Display for AssistantConversationChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ResearchDestination {
+    pub(crate) id: String,
+    pub(crate) label: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResearchOriginalView {
+    pub(crate) source_id: parchmint_domain::ResearchSourceId,
+    pub(crate) filename: String,
+    pub(crate) sha256: [u8; 32],
+}
+impl std::fmt::Display for ResearchDestination {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.label)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResearchImportDraft {
+    pub(crate) nonce: [u8; 16],
+    pub(crate) title: String,
+    pub(crate) parent_id: String,
+    pub(crate) question: String,
+    pub(crate) answer: String,
+    pub(crate) sources: Vec<parchmint_assistant_api::WebCitation>,
+    pub(crate) form: ResearchImportForm,
+    pub(crate) retrieved_at: u64,
+    pub(crate) manual_url: Option<String>,
+    pub(crate) original_source: usize,
+    pub(crate) pending: bool,
+    pub(crate) uncertain: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) fresh_id_on_edit: bool,
+}
+
+impl ResearchImportDraft {
+    fn start_new_identity_if_edited(&mut self, changed: bool) {
+        if changed && self.fresh_id_on_edit {
+            self.nonce = research_import_nonce();
+            self.fresh_id_on_edit = false;
+        }
+    }
+}
+
+fn save_research_import(
+    draft: &ResearchImportDraft,
+) -> parchmint_ui_api::AssistantSavedResearchImport {
+    parchmint_ui_api::AssistantSavedResearchImport {
+        nonce: draft.nonce,
+        title: draft.title.clone(),
+        parent_id: draft.parent_id.clone(),
+        question: draft.question.clone(),
+        answer: draft.answer.clone(),
+        sources: draft.sources.clone(),
+        form: match draft.form {
+            ResearchImportForm::Summary => parchmint_ui_api::AssistantSavedResearchForm::Summary,
+            ResearchImportForm::SourceLink => {
+                parchmint_ui_api::AssistantSavedResearchForm::SourceLink
+            }
+            ResearchImportForm::Original => parchmint_ui_api::AssistantSavedResearchForm::Original,
+        },
+        retrieved_at: draft.retrieved_at,
+        manual_url: draft.manual_url.clone(),
+        original_source: draft.original_source,
+        fresh_id_on_edit: draft.fresh_id_on_edit,
+        commit_started: draft.pending || draft.uncertain,
+    }
+}
+
+fn restore_research_import(
+    draft: parchmint_ui_api::AssistantSavedResearchImport,
+) -> ResearchImportDraft {
+    ResearchImportDraft {
+        nonce: draft.nonce,
+        title: draft.title,
+        parent_id: draft.parent_id,
+        question: draft.question,
+        answer: draft.answer,
+        sources: draft.sources,
+        form: match draft.form {
+            parchmint_ui_api::AssistantSavedResearchForm::Summary => ResearchImportForm::Summary,
+            parchmint_ui_api::AssistantSavedResearchForm::SourceLink => {
+                ResearchImportForm::SourceLink
+            }
+            parchmint_ui_api::AssistantSavedResearchForm::Original => ResearchImportForm::Original,
+        },
+        retrieved_at: draft.retrieved_at,
+        manual_url: draft.manual_url,
+        original_source: draft.original_source,
+        fresh_id_on_edit: draft.fresh_id_on_edit,
+        pending: false,
+        uncertain: draft.commit_started,
+        error: None,
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantNoteOrigin {
+    pub(crate) document: parchmint_domain::DocumentId,
+    pub(crate) session: parchmint_editor_api::SharedEditorSession,
+    pub(crate) view: parchmint_editor_api::ViewId,
+    pub(crate) revision: parchmint_editor_api::EditorRevision,
+    pub(crate) selection: parchmint_editor_api::EditorSelection,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantPending {
+    pub(crate) id: u64,
+    pub(crate) prompt: String,
+    pub(crate) cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) note_origin: Option<AssistantNoteOrigin>,
+    pub(crate) edit_origin: Option<AssistantEditOrigin>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantEditOrigin {
+    pub(crate) turn: usize,
+    pub(crate) finding: usize,
+    pub(crate) evidence: usize,
+    pub(crate) scope: parchmint_assistant_api::CheckScope,
+    pub(crate) finding_snapshot: parchmint_assistant_api::CheckFinding,
+    pub(crate) session: Option<parchmint_editor_api::SharedEditorSession>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AssistantEditProposal {
+    pub(crate) origin: AssistantEditOrigin,
+    pub(crate) target: parchmint_ui_api::AssistantEditProposalTarget,
+    pub(crate) replacement: String,
+    pub(crate) usage_warning: Option<String>,
+    pub(crate) estimated_cost_micros: Option<u64>,
+    pub(crate) estimated_period_total_micros: Option<u64>,
+}
+
+/// An in-memory password input that is redacted from message diagnostics.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct AssistantSecretDraft(String);
+
+impl AssistantSecretDraft {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for AssistantSecretDraft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AssistantSettingsState {
+    pub(crate) profile: parchmint_preferences::AssistantPreferences,
+    pub(crate) saved_profile: parchmint_preferences::AssistantPreferences,
+    pub(crate) key: AssistantSecretDraft,
+    pub(crate) session_only: bool,
+    pub(crate) dirty: bool,
+    pub(crate) busy: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) edit_generation: u64,
+    pub(crate) show_budget: bool,
+    pub(crate) budget_draft: String,
+    pub(crate) warning_draft: String,
+    pub(crate) reset_draft: String,
+}
+
+impl Default for AssistantSettingsState {
+    fn default() -> Self {
+        let profile = parchmint_preferences::AssistantPreferences::default();
+        Self {
+            saved_profile: profile.clone(),
+            profile,
+            key: Default::default(),
+            session_only: false,
+            dirty: false,
+            busy: false,
+            error: None,
+            edit_generation: 0,
+            show_budget: false,
+            budget_draft: "80.00".into(),
+            warning_draft: "60.00".into(),
+            reset_draft: "1".into(),
+        }
+    }
+}
+
+pub(crate) fn parse_dollars(value: &str) -> Option<u64> {
+    let (whole, fractional) = value.trim().split_once('.').unwrap_or((value.trim(), ""));
+    if whole.is_empty()
+        || fractional.len() > 2
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let dollars = whole.parse::<u64>().ok()?;
+    let cents = match fractional.len() {
+        0 => 0,
+        1 => fractional.parse::<u64>().ok()? * 10,
+        _ => fractional.parse::<u64>().ok()?,
+    };
+    dollars.checked_mul(100)?.checked_add(cents)
+}
+
+impl AssistantDockTab {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Ask => "Ask",
+            Self::Check => "Check",
+            Self::Research => "Research",
+            Self::Notes => "Notes",
+        }
+    }
+}
+
 /// Widget messages at the project-workspace boundary.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectMessage {
+    SelectAssistantTab(AssistantDockTab),
+    NewAssistantConversation(AssistantDockTab),
+    SelectAssistantConversation {
+        tab: AssistantDockTab,
+        id: String,
+    },
+    ToggleAssistantConversationList(AssistantDockTab),
+    ToggleAssistantConversationMenu(AssistantDockTab),
+    BeginAssistantConversationRename(AssistantDockTab),
+    SetAssistantConversationName {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        name: String,
+    },
+    CommitAssistantConversationRename {
+        tab: AssistantDockTab,
+        conversation_id: String,
+    },
+    BeginAssistantConversationDelete(AssistantDockTab),
+    CancelAssistantConversationDelete(AssistantDockTab),
+    ConfirmAssistantConversationDelete {
+        tab: AssistantDockTab,
+        conversation_id: String,
+    },
+    SetAssistantDraft {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        value: String,
+    },
+    EditAssistantDraft {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        action: text_editor::Action,
+    },
+    UndoAssistantDraft {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        redo: bool,
+    },
+    ToggleAssistantContext {
+        tab: AssistantDockTab,
+        turn: usize,
+    },
+    ToggleCheckFinding {
+        conversation_id: String,
+        turn: usize,
+        finding: usize,
+    },
+    SetCheckDecision {
+        conversation_id: String,
+        turn: usize,
+        finding: usize,
+        decision: parchmint_domain::ContinuityDecision,
+    },
+    ProposeCheckEdit {
+        conversation_id: String,
+        turn: usize,
+        finding: usize,
+        evidence: usize,
+    },
+    ApplyCheckEdit {
+        conversation_id: String,
+    },
+    DiscardCheckEdit {
+        conversation_id: String,
+    },
+    ToggleAssistantContextControls(AssistantDockTab),
+    SetAssistantContextScope {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        node: Option<String>,
+    },
+    SetAssistantSelectionOnly {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        enabled: bool,
+    },
+    SetAssistantNotes {
+        conversation_id: String,
+        choice: AssistantNotesChoice,
+    },
+    ToggleAssistantContextRule {
+        tab: AssistantDockTab,
+        conversation_id: String,
+        node: String,
+        rule: AssistantContextRule,
+    },
+    SubmitAssistant {
+        tab: AssistantDockTab,
+        conversation_id: String,
+    },
+    CancelAssistant {
+        tab: AssistantDockTab,
+        conversation_id: String,
+    },
+    BeginClearAssistant,
+    CancelClearAssistant,
+    ConfirmClearAssistant,
+    RetryAssistantHistory,
+    BeginResearchImport {
+        conversation_id: String,
+        turn: usize,
+    },
+    BeginManualResearchImport,
+    SetResearchSourceUrl(String),
+    SetResearchImportTitle(String),
+    SetResearchImportDestination(String),
+    SetResearchImportForm(ResearchImportForm),
+    SelectResearchOriginal(usize),
+    ResumeResearchImport,
+    CancelResearchImport,
+    ConfirmResearchImport,
+    SetAssistantProvider(parchmint_preferences::AssistantProvider),
+    SetAssistantModel(String),
+    SetAssistantEndpoint(String),
+    SetAssistantAuthentication(parchmint_preferences::AssistantAuthentication),
+    SetAssistantFunctionTools(bool),
+    SetAssistantStreaming(bool),
+    SetAssistantKey(AssistantSecretDraft),
+    SetAssistantSessionOnly(bool),
+    SaveAssistantSettings,
+    RemoveAssistantKey,
+    ToggleAssistantBudget,
+    SetAssistantBudget(String),
+    SetAssistantWarning(String),
+    SetAssistantResetDay(String),
     NewDraft(EditorPane),
     FormatScratch {
         pane: EditorPane,
@@ -4610,6 +5133,7 @@ pub enum ProjectMessage {
     DeleteSelection,
     PreviewHierarchyNode(String),
     OpenHierarchyNode(String),
+    OpenAssistantPassage(Box<parchmint_assistant_api::ContextPassage>),
     OpenHierarchyNodeInCompanion(String),
     BeginHierarchyRename(String),
     SetHierarchyRenameDraft(String),
@@ -4844,6 +5368,20 @@ pub enum ProjectMessage {
 /// Integration effects translated into application/service calls.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectEffect {
+    SetContinuityDecision {
+        record: Box<parchmint_domain::ContinuityDecisionRecord>,
+        expected: Option<Box<parchmint_domain::ContinuityDecisionRecord>>,
+    },
+    ImportResearch {
+        nonce: [u8; 16],
+        parent_id: String,
+        title: String,
+        question: String,
+        answer: String,
+        sources: Vec<parchmint_assistant_api::WebCitation>,
+        form: ResearchImportForm,
+        retrieved_at: u64,
+    },
     LoadCommentDocuments(Vec<String>),
     CreateDraft {
         pane: EditorPane,
@@ -4855,6 +5393,20 @@ pub enum ProjectEffect {
         parent_id: String,
     },
     OpenDocumentInPrimary(String),
+    NavigateAssistantPassage {
+        source: Box<parchmint_assistant_api::ContextPassage>,
+        mount_generation: u64,
+        interaction_generation: u64,
+    },
+    ReturnToWriting {
+        document_id: String,
+        session: parchmint_editor_api::SharedEditorSession,
+        revision: parchmint_editor_api::EditorRevision,
+        selection: parchmint_editor_api::EditorSelection,
+        scroll_y: f32,
+        mount_generation: u64,
+        interaction_generation: u64,
+    },
     OpenDocumentInCompanion(String),
     CreateHierarchy {
         parent_id: String,
@@ -4962,7 +5514,19 @@ pub enum ProjectEffect {
 /// Project-facing presentation model integrated with the mounted editor model.
 #[derive(Debug, Clone)]
 pub struct ProjectWorkspace {
+    assistant_tab: AssistantDockTab,
+    assistant_settings: AssistantSettingsState,
+    assistant_threads: BTreeMap<AssistantDockTab, AssistantThread>,
+    assistant_archived_threads: BTreeMap<String, (AssistantDockTab, AssistantThread)>,
+    assistant_return: Option<AssistantReturnLocation>,
+    assistant_history_error: Option<String>,
+    assistant_history_touched: bool,
+    assistant_history_check_pending: bool,
+    research_originals: BTreeMap<String, Vec<ResearchOriginalView>>,
+    continuity_decisions:
+        BTreeMap<parchmint_domain::CheckDecisionId, parchmint_domain::ContinuityDecisionRecord>,
     session: u64,
+    project_id: Option<parchmint_domain::ProjectId>,
     project_revision: u64,
     project_title: String,
     sidebar: SidebarSurface,
@@ -5072,7 +5636,18 @@ impl ProjectWorkspace {
         };
         let explorer = ExplorerState::fixture();
         Self {
+            assistant_tab: AssistantDockTab::Notes,
+            assistant_settings: AssistantSettingsState::default(),
+            assistant_threads: BTreeMap::new(),
+            assistant_archived_threads: BTreeMap::new(),
+            assistant_return: None,
+            assistant_history_error: None,
+            assistant_history_touched: false,
+            assistant_history_check_pending: false,
+            research_originals: BTreeMap::new(),
+            continuity_decisions: BTreeMap::new(),
             session: 37,
+            project_id: None,
             project_revision: 1,
             project_title: "The Glass Harbor".to_owned(),
             sidebar,
@@ -5159,7 +5734,18 @@ impl ProjectWorkspace {
             .values()
             .any(|node| node.kind == HierarchyNodeKind::Document);
         Self {
+            assistant_tab: AssistantDockTab::Notes,
+            assistant_settings: AssistantSettingsState::default(),
+            assistant_threads: BTreeMap::new(),
+            assistant_archived_threads: BTreeMap::new(),
+            assistant_return: None,
+            assistant_history_error: None,
+            assistant_history_touched: false,
+            assistant_history_check_pending: false,
+            research_originals: research_originals_from_project(&snapshot.project),
+            continuity_decisions: snapshot.project.continuity_decisions.clone(),
             session: 0,
+            project_id: Some(snapshot.project.id),
             project_revision: snapshot.project.revision.value(),
             project_title: snapshot.project.display_title.clone(),
             sidebar: SidebarSurface::Explorer,
@@ -5255,8 +5841,11 @@ impl ProjectWorkspace {
         self.cards_word_counts_cache.get_mut().take();
         self.drop_preview = None;
         let prior_node_ids = self.explorer.nodes.keys().cloned().collect::<BTreeSet<_>>();
+        self.project_id = Some(snapshot.project.id);
         self.project_revision = snapshot.project.revision.value();
         self.project_title = snapshot.project.display_title.clone();
+        self.research_originals = research_originals_from_project(&snapshot.project);
+        self.continuity_decisions = snapshot.project.continuity_decisions.clone();
         self.explorer.reconcile_project(&snapshot.project);
         self.card_details_expanded
             .retain(|id| self.explorer.nodes.contains_key(id));
@@ -5340,6 +5929,7 @@ impl ProjectWorkspace {
         self.recently_deleted.reconcile_snapshot(snapshot);
         self.export.reconcile_project(&snapshot.project);
         self.editor.reconcile_snapshot(snapshot);
+        self.prune_assistant_return();
 
         if !self.explorer.nodes.contains_key(&self.cards_section) {
             self.cards_section = stable_id_string(ProjectSection::Manuscript.root_id().as_bytes());
@@ -6012,6 +6602,688 @@ impl ProjectWorkspace {
         &self.settings
     }
 
+    pub const fn assistant_tab(&self) -> AssistantDockTab {
+        self.assistant_tab
+    }
+
+    pub(crate) fn assistant_settings(&self) -> &AssistantSettingsState {
+        &self.assistant_settings
+    }
+
+    pub(crate) fn assistant_settings_mut(&mut self) -> &mut AssistantSettingsState {
+        &mut self.assistant_settings
+    }
+
+    pub(crate) fn assistant_thread(&self, tab: AssistantDockTab) -> Option<&AssistantThread> {
+        self.assistant_threads.get(&tab)
+    }
+
+    pub(crate) fn assistant_return(&self) -> Option<&AssistantReturnLocation> {
+        self.assistant_return.as_ref()
+    }
+
+    pub(crate) fn remember_assistant_return(&mut self, location: AssistantReturnLocation) {
+        if self.assistant_return.is_none() {
+            self.assistant_return = Some(location);
+        }
+    }
+
+    pub(crate) fn clear_assistant_return(&mut self) {
+        self.assistant_return = None;
+    }
+
+    pub(crate) fn prune_assistant_return(&mut self) {
+        if self.assistant_return.as_ref().is_some_and(|location| {
+            !self
+                .editor
+                .pane(EditorPane::Primary)
+                .tabs()
+                .iter()
+                .any(|tab| tab.id() == location.tab_id())
+        }) {
+            self.assistant_return = None;
+        }
+    }
+
+    pub(crate) fn remap_assistant_return_for_promotion(&mut self, scratch: &str, document: &str) {
+        if let Some(AssistantReturnLocation::Scratch { tab_id }) = self.assistant_return.as_mut()
+            && tab_id == scratch
+        {
+            *tab_id = document.to_owned();
+        }
+    }
+
+    pub(crate) fn upgrade_assistant_scratch_return(&mut self, location: AssistantReturnLocation) {
+        if matches!(self.assistant_return.as_ref(), Some(AssistantReturnLocation::Scratch { tab_id }) if tab_id == location.tab_id())
+        {
+            self.assistant_return = Some(location);
+        }
+    }
+
+    pub(crate) fn assistant_thread_mut(&mut self, tab: AssistantDockTab) -> &mut AssistantThread {
+        match self.assistant_threads.entry(tab) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(AssistantThread::new())
+            }
+        }
+    }
+
+    pub(crate) fn assistant_thread_by_id_mut(
+        &mut self,
+        tab: AssistantDockTab,
+        id: &str,
+    ) -> Option<&mut AssistantThread> {
+        if self
+            .assistant_threads
+            .get(&tab)
+            .is_some_and(|thread| thread.id == id)
+        {
+            return self.assistant_threads.get_mut(&tab);
+        }
+        self.assistant_archived_threads
+            .get_mut(id)
+            .and_then(|(owner, thread)| (*owner == tab).then_some(thread))
+    }
+
+    pub(crate) fn assistant_thread_by_id(
+        &self,
+        tab: AssistantDockTab,
+        id: &str,
+    ) -> Option<&AssistantThread> {
+        self.assistant_threads
+            .get(&tab)
+            .filter(|thread| thread.id == id)
+            .or_else(|| {
+                self.assistant_archived_threads
+                    .get(id)
+                    .and_then(|(owner, thread)| (*owner == tab).then_some(thread))
+            })
+    }
+
+    pub(crate) fn check_edit_is_current(
+        &self,
+        conversation_id: &str,
+        origin: &AssistantEditOrigin,
+    ) -> bool {
+        let Some(thread) = self.assistant_thread_by_id(AssistantDockTab::Check, conversation_id)
+        else {
+            return false;
+        };
+        let Some(report) = thread
+            .turns
+            .get(origin.turn)
+            .and_then(|turn| turn.result.check_report.as_ref())
+        else {
+            return false;
+        };
+        if report.scope.as_ref() != Some(&origin.scope)
+            || report.findings.get(origin.finding) != Some(&origin.finding_snapshot)
+            || thread.context_scope != origin.scope.evidence_scope
+            || thread.selection_only != origin.scope.selection_only
+            || thread.excluded_context != origin.scope.excluded.iter().cloned().collect()
+            || origin
+                .finding_snapshot
+                .evidence
+                .iter()
+                .any(|source| !self.assistant_source_is_current(source))
+        {
+            return false;
+        }
+        let within = |node: &str, root: &str| node == root || self.explorer.is_ancestor(root, node);
+        if self.explorer.title(&origin.scope.target).is_none()
+            || origin
+                .scope
+                .evidence_scope
+                .as_ref()
+                .is_some_and(|root| self.explorer.title(root).is_none())
+            || origin
+                .scope
+                .excluded
+                .iter()
+                .any(|root| self.explorer.title(root).is_none())
+            || origin.finding_snapshot.evidence.iter().any(|source| {
+                let Some(node) = self.node_for_document(&source.document_id) else {
+                    return true;
+                };
+                origin.scope.excluded.iter().any(|root| within(&node, root))
+                    || (origin.scope.selection_only && !within(&node, &origin.scope.target))
+                    || origin.scope.evidence_scope.as_ref().is_some_and(|root| {
+                        !within(&node, &origin.scope.target) && !within(&node, root)
+                    })
+            })
+        {
+            return false;
+        }
+        let Some(source) = origin.finding_snapshot.evidence.get(origin.evidence) else {
+            return false;
+        };
+        if source.original.is_some()
+            || source.section == parchmint_assistant_api::ProjectSection::Notes
+            || source.anchor.is_none()
+        {
+            return false;
+        }
+        let Some(node) = self.node_for_document(&source.document_id) else {
+            return false;
+        };
+        within(&node, &origin.scope.target)
+    }
+
+    pub(crate) fn check_edit_origin(
+        &self,
+        conversation_id: &str,
+        turn: usize,
+        finding: usize,
+        evidence: usize,
+    ) -> Option<AssistantEditOrigin> {
+        let thread = self.assistant_threads.get(&AssistantDockTab::Check)?;
+        if thread.id != conversation_id {
+            return None;
+        }
+        let report = thread.turns.get(turn)?.result.check_report.as_ref()?;
+        let origin = AssistantEditOrigin {
+            turn,
+            finding,
+            evidence,
+            scope: report.scope.clone()?,
+            finding_snapshot: report.findings.get(finding)?.clone(),
+            session: None,
+        };
+        let source = origin.finding_snapshot.evidence.get(evidence)?;
+        (self.check_edit_is_current(conversation_id, &origin)
+            && self.editor.pane(EditorPane::Primary).active_document()
+                == Some(source.document_id.as_str()))
+        .then_some(origin)
+    }
+
+    /// Capture a decision only from the active conversation's validated,
+    /// still-current findings. Notes lack stable note identities here and are
+    /// intentionally not eligible for durable decisions.
+    pub(crate) fn check_decision_candidate(
+        &self,
+        conversation_id: &str,
+        turn: usize,
+        finding: usize,
+        decision: parchmint_domain::ContinuityDecision,
+    ) -> Option<parchmint_domain::ContinuityDecisionRecord> {
+        self.build_check_decision(conversation_id, turn, finding, decision, true)
+    }
+
+    fn build_check_decision(
+        &self,
+        conversation_id: &str,
+        turn: usize,
+        finding: usize,
+        decision: parchmint_domain::ContinuityDecision,
+        require_current: bool,
+    ) -> Option<parchmint_domain::ContinuityDecisionRecord> {
+        use parchmint_domain::{CheckDecisionId, ContinuityCategory};
+        let thread = self.assistant_threads.get(&AssistantDockTab::Check)?;
+        if thread.id != conversation_id {
+            return None;
+        }
+        let result = &thread.turns.get(turn)?.result;
+        let report = result.check_report.as_ref()?;
+        let scope = report.scope.as_ref()?;
+        let finding = report.findings.get(finding)?;
+        if require_current
+            && finding
+                .evidence
+                .iter()
+                .any(|item| !self.assistant_source_is_current(item))
+        {
+            return None;
+        }
+        let within = |node: &str, root: &str| node == root || self.explorer.is_ancestor(root, node);
+        if require_current {
+            let nodes = [
+                self.node_for_document(&finding.evidence[0].document_id)?,
+                self.node_for_document(&finding.evidence[1].document_id)?,
+            ];
+            if !nodes.iter().any(|node| within(node, &scope.target))
+                || nodes
+                    .iter()
+                    .any(|node| scope.excluded.iter().any(|excluded| within(node, excluded)))
+                || scope.evidence_scope.as_ref().is_some_and(|root| {
+                    nodes
+                        .iter()
+                        .any(|node| !within(node, &scope.target) && !within(node, root))
+                })
+            {
+                return None;
+            }
+        }
+        let mut record = parchmint_assistant_core::continuity_match::capture(
+            finding,
+            scope,
+            &result.context,
+            decision,
+        )?;
+        let mut identity = b"parchmint-check-decision-v1".to_vec();
+        let mut add = |value: &[u8]| {
+            identity.extend_from_slice(&(value.len() as u64).to_be_bytes());
+            identity.extend_from_slice(value);
+        };
+        let category_tag = match record.category {
+            ContinuityCategory::IdentityAppearance => "identity-appearance",
+            ContinuityCategory::TimeTravel => "time-travel",
+            ContinuityCategory::ObjectsPossession => "objects-possession",
+            ContinuityCategory::Rules => "rules",
+            ContinuityCategory::Relationships => "relationships",
+            ContinuityCategory::Knowledge => "knowledge",
+            ContinuityCategory::Other => "other",
+        };
+        add(category_tag.as_bytes());
+        add(record.explanation.as_bytes());
+        add(record.target.as_bytes());
+        for evidence in &record.evidence {
+            add(evidence.document.as_bytes());
+            add(&evidence.revision.to_be_bytes());
+            add(evidence.quote.as_bytes());
+            add(evidence.before.as_bytes());
+            add(evidence.after.as_bytes());
+            if let Some(original) = &evidence.original {
+                add(original.source_id.as_bytes());
+                add(&original.sha256);
+            } else {
+                add(&[]);
+            }
+        }
+        if let Some(scope) = record.evidence_scope {
+            add(scope.as_bytes());
+        } else {
+            add(&[]);
+        }
+        for excluded in &record.excluded {
+            add(excluded.as_bytes());
+        }
+        add(&[u8::from(record.selection_only)]);
+        let hash = parchmint_project_format::ContentHash::of_bytes(&identity);
+        let mut id = [0; 16];
+        id.copy_from_slice(&hash.as_bytes()[..16]);
+        record.id = if let Some(matched) = &finding.matched_decision_id {
+            let matched = CheckDecisionId::from_bytes(parchmint_domain::decode_stable_id(matched)?);
+            let existing = self.continuity_decisions.get(&matched)?;
+            if !existing.same_issue_as(&record) {
+                return None;
+            }
+            matched
+        } else {
+            CheckDecisionId::from_bytes(id)
+        };
+        record.validate().ok()?;
+        if let Some(existing) = self.continuity_decisions.get(&record.id) {
+            if !existing.same_issue_as(&record) {
+                return None;
+            }
+            record.rationale.clone_from(&existing.rationale);
+        }
+        Some(record)
+    }
+
+    pub(crate) fn saved_check_decision(
+        &self,
+        conversation_id: &str,
+        turn: usize,
+        finding: usize,
+    ) -> Option<parchmint_domain::ContinuityDecision> {
+        let candidate = self.build_check_decision(
+            conversation_id,
+            turn,
+            finding,
+            parchmint_domain::ContinuityDecision::Intentional,
+            false,
+        )?;
+        self.continuity_decisions
+            .get(&candidate.id)
+            .map(|record| record.decision)
+    }
+
+    pub(crate) fn assistant_conversation_choices(
+        &self,
+        tab: AssistantDockTab,
+    ) -> Vec<AssistantConversationChoice> {
+        self.assistant_threads
+            .get(&tab)
+            .into_iter()
+            .chain(
+                self.assistant_archived_threads
+                    .values()
+                    .filter_map(|(owner, thread)| (*owner == tab).then_some(thread)),
+            )
+            .map(|thread| AssistantConversationChoice {
+                id: thread.id.clone(),
+                label: if thread.pending.is_some() {
+                    format!("{} · …", thread.title)
+                } else {
+                    thread.title.clone()
+                },
+            })
+            .collect()
+    }
+
+    pub(crate) fn assistant_history_error(&self) -> Option<&str> {
+        self.assistant_history_error.as_deref()
+    }
+
+    pub(crate) fn set_assistant_history_error(&mut self, error: Option<String>) {
+        self.assistant_history_error = error;
+    }
+
+    pub(crate) fn mark_assistant_history_touched(&mut self) {
+        self.assistant_history_touched = true;
+    }
+
+    pub(crate) fn assistant_history_touched(&self) -> bool {
+        self.assistant_history_touched
+    }
+
+    pub(crate) fn assistant_history_check_pending(&self) -> bool {
+        self.assistant_history_check_pending
+    }
+
+    pub(crate) fn set_assistant_history_check_pending(&mut self, pending: bool) {
+        self.assistant_history_check_pending = pending;
+    }
+
+    pub(crate) fn accept_assistant_history_status(&mut self, status: Result<bool, String>) {
+        match status {
+            Ok(true) => {}
+            Ok(false) => {
+                self.assistant_history_check_pending = false;
+                self.assistant_history_error = None;
+            }
+            Err(error) => {
+                self.assistant_history_check_pending = false;
+                self.assistant_history_error = Some(error);
+            }
+        }
+    }
+
+    pub(crate) fn assistant_conversation_snapshot(
+        &self,
+    ) -> parchmint_ui_api::AssistantConversationState {
+        use parchmint_assistant_api::AssistantMode;
+        let threads = self
+            .assistant_threads
+            .iter()
+            .map(|(tab, thread)| (*tab, thread, true))
+            .chain(
+                self.assistant_archived_threads
+                    .values()
+                    .map(|(tab, thread)| (*tab, thread, false)),
+            )
+            .filter_map(|(tab, thread, active)| {
+                let mode = match tab {
+                    AssistantDockTab::Ask => AssistantMode::Ask,
+                    AssistantDockTab::Check => AssistantMode::Check,
+                    AssistantDockTab::Research => AssistantMode::Research,
+                    AssistantDockTab::Notes => return None,
+                };
+                let mut interrupted_prompts = thread.interrupted_prompts.clone();
+                if let Some(pending) = &thread.pending
+                    && !interrupted_prompts.contains(&pending.prompt)
+                {
+                    interrupted_prompts.push(pending.prompt.clone());
+                }
+                Some(parchmint_ui_api::AssistantSavedThread {
+                    mode,
+                    id: thread.id.clone(),
+                    title: thread.title.clone(),
+                    auto_title: thread.auto_title,
+                    active,
+                    research_import: thread.research_import.as_ref().map(save_research_import),
+                    draft: thread.draft.clone(),
+                    turns: thread
+                        .turns
+                        .iter()
+                        .map(|turn| parchmint_ui_api::AssistantSavedTurn {
+                            question: turn.question.clone(),
+                            result: turn.result.clone(),
+                        })
+                        .collect(),
+                    note_proposal: thread.note_proposal.clone(),
+                    interrupted_prompts,
+                    pinned_context: thread.pinned_context.iter().cloned().collect(),
+                    excluded_context: thread.excluded_context.iter().cloned().collect(),
+                    context_scope: thread.context_scope.clone(),
+                    selection_only: thread.selection_only,
+                })
+            })
+            .collect();
+        parchmint_ui_api::AssistantConversationState {
+            threads,
+            research_import: None,
+        }
+    }
+
+    pub(crate) fn restore_assistant_conversations(
+        &mut self,
+        snapshot: parchmint_ui_api::AssistantConversationState,
+    ) -> Result<(), String> {
+        use parchmint_assistant_api::AssistantMode;
+        let mut restored: BTreeMap<AssistantDockTab, AssistantThread> = BTreeMap::new();
+        let mut archived = BTreeMap::new();
+        let mut ids = BTreeSet::new();
+        let mut active_modes = BTreeSet::new();
+        for saved in snapshot.threads {
+            let tab = match saved.mode {
+                AssistantMode::Ask => AssistantDockTab::Ask,
+                AssistantMode::Check => AssistantDockTab::Check,
+                AssistantMode::Research => AssistantDockTab::Research,
+            };
+            let interrupted = !saved.interrupted_prompts.is_empty();
+            let legacy = saved.id.is_empty();
+            let thread = AssistantThread {
+                id: if saved.id.is_empty() { stable_id_string(&research_import_nonce()) } else { saved.id },
+                title: if saved.title.trim().is_empty() { "New conversation".to_owned() } else { saved.title },
+                auto_title: saved.auto_title || legacy,
+                menu_open: false,
+                list_open: false,
+                renaming: false,
+                rename_draft: String::new(),
+                confirming_delete: false,
+                draft_editor: text_editor::Content::with_text(&saved.draft),
+                draft: saved.draft,
+                draft_undo: Vec::new(),
+                draft_redo: Vec::new(),
+                turns: saved.turns.into_iter().map(|turn| AssistantTurn { question: turn.question, result: turn.result }).collect(),
+                pending: None,
+                progress: Default::default(),
+                error: interrupted.then(|| "A previous request was interrupted and not sent again. The provider may still have charged for it.".into()),
+                next_request: 0,
+                note_proposal: saved.note_proposal,
+                edit_proposal: None,
+                interrupted_prompts: saved.interrupted_prompts,
+                confirming_clear: false,
+                expanded_context: BTreeSet::new(),
+                expanded_findings: BTreeSet::new(),
+                context_controls_open: false,
+                pinned_context: saved.pinned_context.into_iter().collect(),
+                excluded_context: saved.excluded_context.into_iter().collect(),
+                context_scope: if saved.selection_only { None } else { saved.context_scope },
+                selection_only: saved.selection_only,
+                explicit_notes: None,
+                research_import: saved.research_import.map(restore_research_import),
+            };
+            if !ids.insert(thread.id.clone())
+                || (saved.active && !active_modes.insert(tab))
+                || (tab != AssistantDockTab::Research && thread.research_import.is_some())
+            {
+                return Err("Assistant history has invalid conversation identities; the existing file was preserved.".into());
+            }
+            if saved.active || !restored.contains_key(&tab) {
+                if let Some(previous) = restored.insert(tab, thread) {
+                    archived.insert(previous.id.clone(), (tab, previous));
+                }
+            } else {
+                archived.insert(thread.id.clone(), (tab, thread));
+            }
+        }
+        if let Some(draft) = snapshot.research_import {
+            let thread = match restored.entry(AssistantDockTab::Research) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(AssistantThread::new())
+                }
+            };
+            if thread.research_import.is_some() {
+                return Err("Assistant history has conflicting research drafts; the existing file was preserved.".into());
+            }
+            thread.research_import = Some(restore_research_import(draft));
+        }
+        self.assistant_threads = restored;
+        self.assistant_archived_threads = archived;
+        Ok(())
+    }
+
+    pub(crate) fn research_import(&self) -> Option<&ResearchImportDraft> {
+        self.assistant_thread(AssistantDockTab::Research)
+            .and_then(|thread| thread.research_import.as_ref())
+    }
+
+    fn research_import_mut(&mut self) -> Option<&mut ResearchImportDraft> {
+        self.assistant_thread_mut(AssistantDockTab::Research)
+            .research_import
+            .as_mut()
+    }
+
+    fn research_thread_for_import(&mut self, nonce: [u8; 16]) -> Option<&mut AssistantThread> {
+        if self
+            .assistant_threads
+            .get(&AssistantDockTab::Research)
+            .and_then(|thread| thread.research_import.as_ref())
+            .is_some_and(|draft| draft.nonce == nonce)
+        {
+            return self.assistant_threads.get_mut(&AssistantDockTab::Research);
+        }
+        self.assistant_archived_threads
+            .values_mut()
+            .find_map(|(tab, thread)| {
+                (*tab == AssistantDockTab::Research
+                    && thread
+                        .research_import
+                        .as_ref()
+                        .is_some_and(|draft| draft.nonce == nonce))
+                .then_some(thread)
+            })
+    }
+
+    pub(crate) fn active_research_originals(&self) -> &[ResearchOriginalView] {
+        self.editor
+            .pane(EditorPane::Primary)
+            .active_document()
+            .and_then(|document| self.research_originals.get(document))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn assistant_source_is_current(
+        &self,
+        source: &parchmint_assistant_api::ContextPassage,
+    ) -> bool {
+        if let Some(original) = &source.original {
+            self.node_for_document(&source.document_id).is_some()
+                && self
+                    .research_originals
+                    .get(&source.document_id)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            stable_id_string(item.source_id.as_bytes()) == original.source_id
+                                && item.sha256 == original.sha256
+                        })
+                    })
+        } else {
+            self.node_for_document(&source.document_id).is_some()
+                && self.editor.document_revision(&source.document_id)
+                    == Some(source.document_revision)
+        }
+    }
+
+    pub(crate) fn complete_research_import(&mut self, nonce: [u8; 16], success: bool) {
+        if let Some(thread) = self.research_thread_for_import(nonce) {
+            if success {
+                thread.research_import = None;
+            } else if let Some(draft) = thread.research_import.as_mut() {
+                draft.pending = false;
+            }
+        }
+    }
+
+    pub(crate) fn fail_research_import_before_mutation(&mut self, nonce: [u8; 16], error: String) {
+        if let Some(draft) = self
+            .research_thread_for_import(nonce)
+            .and_then(|thread| thread.research_import.as_mut())
+        {
+            draft.pending = false;
+            draft.error = Some(error);
+        }
+    }
+
+    pub(crate) fn research_destinations(&self) -> Vec<ResearchDestination> {
+        let canonical = stable_id_string(ProjectSection::Research.root_id().as_bytes());
+        let root = if self.explorer.nodes.contains_key(&canonical) {
+            canonical
+        } else {
+            "research".to_owned()
+        };
+        fn visit(
+            explorer: &ExplorerState,
+            id: &str,
+            prefix: &str,
+            rows: &mut Vec<ResearchDestination>,
+        ) {
+            let Some(node) = explorer.nodes.get(id) else {
+                return;
+            };
+            if !matches!(
+                node.kind,
+                HierarchyNodeKind::Root | HierarchyNodeKind::Group
+            ) {
+                return;
+            }
+            let label = if prefix.is_empty() {
+                node.title.clone()
+            } else {
+                format!("{prefix} / {}", node.title)
+            };
+            rows.push(ResearchDestination {
+                id: id.to_owned(),
+                label: label.clone(),
+            });
+            for child in &node.children {
+                visit(explorer, child, &label, rows);
+            }
+        }
+        let mut rows = Vec::new();
+        visit(&self.explorer, &root, "", &mut rows);
+        rows
+    }
+
+    pub(crate) fn cancel_assistant_requests(&mut self) {
+        let mut interrupted = false;
+        for thread in self.assistant_threads.values_mut().chain(
+            self.assistant_archived_threads
+                .values_mut()
+                .map(|(_, thread)| thread),
+        ) {
+            if let Some(pending) = thread.pending.take() {
+                pending
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                thread.progress = Default::default();
+                if pending.edit_origin.is_none()
+                    && !thread.interrupted_prompts.contains(&pending.prompt)
+                {
+                    thread.interrupted_prompts.push(pending.prompt);
+                }
+                thread.error = Some("The request was interrupted and will not be sent again. The provider may still charge for it.".into());
+                interrupted = true;
+            }
+        }
+        self.assistant_history_touched |= interrupted;
+    }
+
     pub(crate) fn shortcut_settings_mut(&mut self) -> &mut SettingsState {
         &mut self.settings
     }
@@ -6419,6 +7691,48 @@ impl ProjectWorkspace {
         self.project_revision
     }
 
+    pub(crate) fn assistant_note_tree_hash(&self) -> Option<[u8; 32]> {
+        let entries = self
+            .explorer
+            .nodes
+            .values()
+            .map(|node| {
+                let kind = match node.kind {
+                    HierarchyNodeKind::Root => 0,
+                    HierarchyNodeKind::Group => 1,
+                    HierarchyNodeKind::Document => 2,
+                };
+                Some(parchmint_ui_api::AssistantNoteTreeEntry {
+                    node: parchmint_domain::NodeId::from_bytes(stable_id_bytes(&node.id)?),
+                    parent: match node.parent.as_deref() {
+                        Some(id) => {
+                            Some(parchmint_domain::NodeId::from_bytes(stable_id_bytes(id)?))
+                        }
+                        None => None,
+                    },
+                    kind,
+                    root_section: if kind == 0 {
+                        Some(ProjectSection::ALL.into_iter().find(|section| {
+                            stable_id_string(section.root_id().as_bytes()) == node.section_id
+                        })?)
+                    } else {
+                        None
+                    },
+                    document: match node.document_id.as_deref() {
+                        Some(id) => Some(parchmint_domain::DocumentId::from_bytes(
+                            stable_id_bytes(id)?,
+                        )),
+                        None => None,
+                    },
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(parchmint_ui_api::assistant_note_tree_hash(
+            self.project_id?,
+            entries,
+        ))
+    }
+
     /// Accepts the revision from a completed persistence refresh while keeping
     /// local editor and Inspector drafts intact. Full snapshot reconciliation
     /// is intentionally reserved for structural workflows.
@@ -6579,8 +7893,7 @@ impl ProjectWorkspace {
                 }),
         );
         self.editor.set_split_ratio(snapshot.layout.split_ratio);
-        self.editor
-            .set_companion_visible(snapshot.layout.companion_open);
+        self.editor.set_companion_visible(false);
         match snapshot.mode {
             WorkspaceMode::Editor => RibbonDestination::Editor,
             WorkspaceMode::Cards => RibbonDestination::Cards,
@@ -6841,6 +8154,759 @@ impl ProjectWorkspace {
             self.comment_context = None;
         }
         match message {
+            ProjectMessage::SelectAssistantTab(tab) => {
+                self.assistant_tab = tab;
+                if tab != AssistantDockTab::Notes {
+                    self.assistant_thread_mut(tab);
+                }
+                Vec::new()
+            }
+            ProjectMessage::NewAssistantConversation(tab) => {
+                if tab == AssistantDockTab::Notes {
+                    return Vec::new();
+                }
+                self.assistant_thread_mut(tab);
+                let titles = self
+                    .assistant_threads
+                    .get(&tab)
+                    .into_iter()
+                    .chain(
+                        self.assistant_archived_threads
+                            .values()
+                            .filter_map(|(owner, thread)| (*owner == tab).then_some(thread)),
+                    )
+                    .map(|thread| thread.title.clone())
+                    .collect::<BTreeSet<_>>();
+                let mut title = "New conversation".to_owned();
+                let mut number = 2_u64;
+                while titles.contains(&title) {
+                    title = format!("New conversation {number}");
+                    number = number.saturating_add(1);
+                }
+                let current = self.assistant_thread_mut(tab);
+                let next = AssistantThread {
+                    title,
+                    pinned_context: current.pinned_context.clone(),
+                    excluded_context: current.excluded_context.clone(),
+                    context_scope: current.context_scope.clone(),
+                    selection_only: current.selection_only,
+                    ..AssistantThread::new()
+                };
+                if let Some(previous) = self.assistant_threads.insert(tab, next) {
+                    self.assistant_archived_threads
+                        .insert(previous.id.clone(), (tab, previous));
+                }
+                Vec::new()
+            }
+            ProjectMessage::SelectAssistantConversation { tab, id } => {
+                if self
+                    .assistant_threads
+                    .get(&tab)
+                    .is_some_and(|thread| thread.id == id)
+                {
+                    self.assistant_thread_mut(tab).list_open = false;
+                    return Vec::new();
+                }
+                if self
+                    .assistant_archived_threads
+                    .get(&id)
+                    .is_none_or(|(owner, _)| *owner != tab)
+                {
+                    return Vec::new();
+                }
+                let (_, mut next) = self
+                    .assistant_archived_threads
+                    .remove(&id)
+                    .expect("conversation checked");
+                next.list_open = false;
+                if let Some(previous) = self.assistant_threads.insert(tab, next) {
+                    self.assistant_archived_threads
+                        .insert(previous.id.clone(), (tab, previous));
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantConversationList(tab) => {
+                let thread = self.assistant_thread_mut(tab);
+                thread.list_open = !thread.list_open;
+                thread.menu_open = false;
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantConversationMenu(tab) => {
+                let thread = self.assistant_thread_mut(tab);
+                thread.menu_open = !thread.menu_open;
+                thread.list_open = false;
+                thread.renaming = false;
+                thread.confirming_delete = false;
+                Vec::new()
+            }
+            ProjectMessage::BeginAssistantConversationRename(tab) => {
+                let thread = self.assistant_thread_mut(tab);
+                thread.rename_draft = thread.title.clone();
+                thread.renaming = true;
+                thread.confirming_delete = false;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantConversationName {
+                tab,
+                conversation_id,
+                name,
+            } => {
+                if let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id)
+                    && thread.renaming
+                {
+                    thread.rename_draft = name.chars().take(80).collect();
+                }
+                Vec::new()
+            }
+            ProjectMessage::CommitAssistantConversationRename {
+                tab,
+                conversation_id,
+            } => {
+                if let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id)
+                    && thread.renaming
+                    && !thread.rename_draft.trim().is_empty()
+                {
+                    thread.title = thread.rename_draft.trim().to_owned();
+                    thread.auto_title = false;
+                    thread.renaming = false;
+                    thread.menu_open = false;
+                }
+                Vec::new()
+            }
+            ProjectMessage::BeginAssistantConversationDelete(tab) => {
+                let thread = self.assistant_thread_mut(tab);
+                if !thread
+                    .research_import
+                    .as_ref()
+                    .is_some_and(|draft| draft.pending || draft.uncertain)
+                {
+                    thread.confirming_delete = true;
+                    thread.renaming = false;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CancelAssistantConversationDelete(tab) => {
+                self.assistant_thread_mut(tab).confirming_delete = false;
+                Vec::new()
+            }
+            ProjectMessage::ConfirmAssistantConversationDelete {
+                tab,
+                conversation_id,
+            } => {
+                let Some(current) = self.assistant_threads.get(&tab) else {
+                    return Vec::new();
+                };
+                if current.id != conversation_id
+                    || !current.confirming_delete
+                    || current
+                        .research_import
+                        .as_ref()
+                        .is_some_and(|draft| draft.pending || draft.uncertain)
+                {
+                    return Vec::new();
+                }
+                let mut removed = self
+                    .assistant_threads
+                    .remove(&tab)
+                    .expect("conversation checked");
+                if let Some(pending) = removed.pending.take() {
+                    pending
+                        .cancelled
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                let replacement = self
+                    .assistant_archived_threads
+                    .iter()
+                    .find_map(|(id, (owner, _))| (*owner == tab).then(|| id.clone()));
+                let next = replacement
+                    .and_then(|id| {
+                        self.assistant_archived_threads
+                            .remove(&id)
+                            .map(|(_, thread)| thread)
+                    })
+                    .unwrap_or_else(AssistantThread::new);
+                self.assistant_threads.insert(tab, next);
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantDraft {
+                tab,
+                conversation_id,
+                value,
+            } => {
+                if let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id)
+                    && thread.draft != value
+                {
+                    thread.explicit_notes = None;
+                    thread.draft_editor = text_editor::Content::with_text(&value);
+                    thread.draft = value;
+                    thread.draft_undo.clear();
+                    thread.draft_redo.clear();
+                }
+                Vec::new()
+            }
+            ProjectMessage::EditAssistantDraft {
+                tab,
+                conversation_id,
+                action,
+            } => {
+                if let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id) {
+                    let edited = action.is_edit();
+                    let cursor = thread.draft_editor.cursor();
+                    thread.draft_editor.perform(action);
+                    if edited {
+                        let value = thread.draft_editor.text();
+                        if thread.draft != value {
+                            remember_assistant_draft(&mut thread.draft_undo, &thread.draft, cursor);
+                            thread.draft_redo.clear();
+                            thread.explicit_notes = None;
+                            thread.draft = value;
+                            if thread.error.as_deref() == Some(ASSISTANT_DRAFT_HISTORY_ERROR) {
+                                thread.error = None;
+                            }
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            ProjectMessage::UndoAssistantDraft {
+                tab,
+                conversation_id,
+                redo,
+            } => {
+                if let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id) {
+                    let available = if redo {
+                        !thread.draft_redo.is_empty()
+                    } else {
+                        !thread.draft_undo.is_empty()
+                    };
+                    if available && thread.draft.len() > ASSISTANT_DRAFT_HISTORY_BYTES {
+                        thread.error = Some(ASSISTANT_DRAFT_HISTORY_ERROR.into());
+                        return Vec::new();
+                    }
+                    let next = if redo {
+                        thread.draft_redo.pop()
+                    } else {
+                        thread.draft_undo.pop()
+                    };
+                    if let Some(next) = next {
+                        if redo {
+                            remember_assistant_draft(
+                                &mut thread.draft_undo,
+                                &thread.draft,
+                                thread.draft_editor.cursor(),
+                            );
+                        } else {
+                            remember_assistant_draft(
+                                &mut thread.draft_redo,
+                                &thread.draft,
+                                thread.draft_editor.cursor(),
+                            );
+                        }
+                        thread.draft = next.text;
+                        thread.draft_editor = text_editor::Content::with_text(&thread.draft);
+                        thread.draft_editor.move_to(next.cursor);
+                        thread.explicit_notes = None;
+                        if thread.error.as_deref() == Some(ASSISTANT_DRAFT_HISTORY_ERROR) {
+                            thread.error = None;
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantContext { tab, turn } => {
+                let thread = self.assistant_thread_mut(tab);
+                if turn < thread.turns.len() && !thread.expanded_context.remove(&turn) {
+                    thread.expanded_context.insert(turn);
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleCheckFinding {
+                conversation_id,
+                turn,
+                finding,
+            } => {
+                if let Some(thread) =
+                    self.assistant_thread_by_id_mut(AssistantDockTab::Check, &conversation_id)
+                    && thread
+                        .turns
+                        .get(turn)
+                        .and_then(|turn| turn.result.check_report.as_ref())
+                        .is_some_and(|report| finding < report.findings.len())
+                    && !thread.expanded_findings.remove(&(turn, finding))
+                {
+                    thread.expanded_findings.insert((turn, finding));
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetCheckDecision {
+                conversation_id,
+                turn,
+                finding,
+                decision,
+            } => self
+                .check_decision_candidate(&conversation_id, turn, finding, decision)
+                .map(|record| ProjectEffect::SetContinuityDecision {
+                    expected: self
+                        .continuity_decisions
+                        .get(&record.id)
+                        .cloned()
+                        .map(Box::new),
+                    record: Box::new(record),
+                })
+                .into_iter()
+                .collect(),
+            ProjectMessage::ProposeCheckEdit { .. } | ProjectMessage::ApplyCheckEdit { .. } => {
+                Vec::new()
+            }
+            ProjectMessage::DiscardCheckEdit { conversation_id } => {
+                if let Some(thread) =
+                    self.assistant_thread_by_id_mut(AssistantDockTab::Check, &conversation_id)
+                {
+                    thread.edit_proposal = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantContextControls(tab) => {
+                if matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Check) {
+                    let thread = self.assistant_thread_mut(tab);
+                    thread.context_controls_open = !thread.context_controls_open;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantContextScope {
+                tab,
+                conversation_id,
+                node,
+            } => {
+                if matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Check)
+                    && node
+                        .as_ref()
+                        .is_none_or(|id| self.explorer.title(id).is_some())
+                    && let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id)
+                {
+                    if thread.context_scope != node {
+                        thread.explicit_notes = None;
+                    }
+                    thread.context_scope = node;
+                    thread.selection_only = false;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantSelectionOnly {
+                tab,
+                conversation_id,
+                enabled,
+            } => {
+                if matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Check)
+                    && let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id)
+                {
+                    thread.selection_only = enabled;
+                    if enabled {
+                        thread.context_scope = None;
+                        thread.explicit_notes = None;
+                    }
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantNotes {
+                conversation_id,
+                choice,
+            } => {
+                let project_revision = self.project_revision();
+                let tree_hash = self.assistant_note_tree_hash();
+                let current = self
+                    .editor
+                    .pane(EditorPane::Primary)
+                    .active_document()
+                    .filter(|id| self.node_for_document(id).is_some())
+                    .and_then(stable_id_bytes)
+                    .map(parchmint_domain::DocumentId::from_bytes);
+                if let Some(thread) =
+                    self.assistant_thread_by_id_mut(AssistantDockTab::Ask, &conversation_id)
+                    && thread.pending.is_none()
+                    && (choice == AssistantNotesChoice::ByRequest
+                        || (!thread.selection_only && !thread.draft.trim().is_empty()))
+                {
+                    let next = match choice {
+                        AssistantNotesChoice::ByRequest => Some(None),
+                        AssistantNotesChoice::CurrentDocument => {
+                            current.zip(tree_hash).map(|(document, tree_hash)| {
+                                Some(parchmint_ui_api::AssistantExplicitNotes::Document {
+                                    document,
+                                    project_revision,
+                                    tree_hash,
+                                })
+                            })
+                        }
+                        AssistantNotesChoice::Project => tree_hash.map(|tree_hash| {
+                            Some(parchmint_ui_api::AssistantExplicitNotes::Project {
+                                project_revision,
+                                tree_hash,
+                            })
+                        }),
+                    };
+                    if let Some(next) = next {
+                        thread.explicit_notes = next;
+                    }
+                }
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantContextRule {
+                tab,
+                conversation_id,
+                node,
+                rule,
+            } => {
+                if !matches!(tab, AssistantDockTab::Ask | AssistantDockTab::Check) {
+                    return Vec::new();
+                }
+                let available = self.explorer.title(&node).is_some();
+                let Some(thread) = self.assistant_thread_by_id_mut(tab, &conversation_id) else {
+                    return Vec::new();
+                };
+                thread.explicit_notes = None;
+                let (selected, opposite) = match rule {
+                    AssistantContextRule::Pinned => {
+                        (&mut thread.pinned_context, &mut thread.excluded_context)
+                    }
+                    AssistantContextRule::Excluded => {
+                        (&mut thread.excluded_context, &mut thread.pinned_context)
+                    }
+                };
+                if !selected.remove(&node) && available {
+                    opposite.remove(&node);
+                    selected.insert(node);
+                }
+                Vec::new()
+            }
+            ProjectMessage::BeginClearAssistant => {
+                let tab = self.assistant_tab;
+                self.assistant_thread_mut(tab).confirming_clear = true;
+                Vec::new()
+            }
+            ProjectMessage::CancelClearAssistant => {
+                let tab = self.assistant_tab;
+                self.assistant_thread_mut(tab).confirming_clear = false;
+                Vec::new()
+            }
+            ProjectMessage::ConfirmClearAssistant => {
+                let tab = self.assistant_tab;
+                let thread = self.assistant_thread_mut(tab);
+                if thread.confirming_clear && thread.pending.is_none() {
+                    thread.turns.clear();
+                    thread.expanded_context.clear();
+                    thread.expanded_findings.clear();
+                    thread.interrupted_prompts.clear();
+                    thread.note_proposal = None;
+                    thread.edit_proposal = None;
+                    thread.error = None;
+                }
+                thread.confirming_clear = false;
+                Vec::new()
+            }
+            ProjectMessage::BeginResearchImport {
+                conversation_id,
+                turn: index,
+            } => {
+                if self
+                    .assistant_thread(AssistantDockTab::Research)
+                    .is_none_or(|thread| thread.id != conversation_id)
+                {
+                    return Vec::new();
+                }
+                let Some(turn) = self
+                    .assistant_thread(AssistantDockTab::Research)
+                    .and_then(|thread| thread.turns.get(index))
+                else {
+                    return Vec::new();
+                };
+                if turn.result.response.web_citations.is_empty() {
+                    return Vec::new();
+                }
+                let question = turn.question.clone();
+                let answer = turn.result.response.text.clone();
+                let sources = turn.result.response.web_citations.clone();
+                let retrieved_at = turn
+                    .result
+                    .web_retrieved_at_unix_seconds
+                    .unwrap_or_default();
+                let Some(destination) = self.research_destinations().into_iter().next() else {
+                    return Vec::new();
+                };
+                self.assistant_thread_mut(AssistantDockTab::Research)
+                    .research_import = Some(ResearchImportDraft {
+                    nonce: research_import_nonce(),
+                    title: question.chars().take(80).collect(),
+                    parent_id: destination.id.clone(),
+                    question,
+                    answer,
+                    sources,
+                    form: ResearchImportForm::Summary,
+                    retrieved_at,
+                    manual_url: None,
+                    original_source: 0,
+                    pending: false,
+                    uncertain: false,
+                    error: None,
+                    fresh_id_on_edit: false,
+                });
+                Vec::new()
+            }
+            ProjectMessage::BeginManualResearchImport => {
+                let Some(destination) = self.research_destinations().into_iter().next() else {
+                    return Vec::new();
+                };
+                let retrieved_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                self.assistant_thread_mut(AssistantDockTab::Research)
+                    .research_import = Some(ResearchImportDraft {
+                    nonce: research_import_nonce(),
+                    title: String::new(),
+                    parent_id: destination.id,
+                    question: "Manually added source".into(),
+                    answer: String::new(),
+                    sources: Vec::new(),
+                    form: ResearchImportForm::SourceLink,
+                    retrieved_at,
+                    manual_url: Some(String::new()),
+                    original_source: 0,
+                    pending: false,
+                    uncertain: false,
+                    error: None,
+                    fresh_id_on_edit: false,
+                });
+                Vec::new()
+            }
+            ProjectMessage::SetResearchSourceUrl(value) => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && !draft.uncertain
+                    && draft.manual_url.is_some()
+                {
+                    draft.start_new_identity_if_edited(
+                        draft.manual_url.as_deref() != Some(value.as_str()),
+                    );
+                    draft.manual_url = Some(value);
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetResearchImportTitle(title) => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && !draft.uncertain
+                {
+                    draft.start_new_identity_if_edited(draft.title != title);
+                    draft.title = title;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetResearchImportDestination(parent) => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && !draft.uncertain
+                {
+                    draft.start_new_identity_if_edited(draft.parent_id != parent);
+                    draft.parent_id = parent;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SetResearchImportForm(form) => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && !draft.uncertain
+                    && !(draft.manual_url.is_some() && form == ResearchImportForm::Summary)
+                {
+                    draft.start_new_identity_if_edited(draft.form != form);
+                    draft.form = form;
+                }
+                Vec::new()
+            }
+            ProjectMessage::SelectResearchOriginal(index) => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && !draft.uncertain
+                    && index < draft.sources.len()
+                {
+                    draft.start_new_identity_if_edited(draft.original_source != index);
+                    draft.original_source = index;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ResumeResearchImport => {
+                if let Some(draft) = self.research_import_mut()
+                    && !draft.pending
+                    && draft.uncertain
+                {
+                    draft.uncertain = false;
+                    draft.fresh_id_on_edit = true;
+                }
+                Vec::new()
+            }
+            ProjectMessage::CancelResearchImport => {
+                if self.research_import().is_some_and(|draft| !draft.pending) {
+                    self.assistant_thread_mut(AssistantDockTab::Research)
+                        .research_import = None;
+                }
+                Vec::new()
+            }
+            ProjectMessage::ConfirmResearchImport => {
+                let Some(draft) = self.research_import_mut() else {
+                    return Vec::new();
+                };
+                if draft.pending || draft.uncertain || draft.title.trim().is_empty() {
+                    return Vec::new();
+                }
+                let mut sources = draft.sources.clone();
+                if let Some(url) = draft.manual_url.as_deref() {
+                    let url = url.trim();
+                    if !url.starts_with("https://")
+                        || parchmint_platform_api::ValidatedExternalIntent::browser_url(url)
+                            .is_err()
+                    {
+                        return Vec::new();
+                    }
+                    sources.push(parchmint_assistant_api::WebCitation {
+                        url: url.to_owned(),
+                        title: draft.title.trim().to_owned(),
+                        start_index: None,
+                        end_index: None,
+                    });
+                }
+                if sources.is_empty() {
+                    return Vec::new();
+                }
+                if draft.form == ResearchImportForm::Original {
+                    let Some(source) = sources.get(draft.original_source).cloned() else {
+                        return Vec::new();
+                    };
+                    sources = vec![source];
+                }
+                draft.pending = true;
+                draft.error = None;
+                vec![ProjectEffect::ImportResearch {
+                    nonce: draft.nonce,
+                    parent_id: draft.parent_id.clone(),
+                    title: draft.title.trim().to_owned(),
+                    question: draft.question.clone(),
+                    answer: draft.answer.clone(),
+                    sources,
+                    form: draft.form,
+                    retrieved_at: draft.retrieved_at,
+                }]
+            }
+            ProjectMessage::SubmitAssistant { .. }
+            | ProjectMessage::CancelAssistant { .. }
+            | ProjectMessage::RetryAssistantHistory => Vec::new(),
+            ProjectMessage::SetAssistantProvider(provider) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                if self.assistant_settings.profile.provider != provider {
+                    self.assistant_settings.key = AssistantSecretDraft::default();
+                    let default_openai =
+                        parchmint_preferences::AssistantPreferences::default().model;
+                    if provider == parchmint_preferences::AssistantProvider::Anthropic
+                        && self.assistant_settings.profile.model == default_openai
+                    {
+                        self.assistant_settings.profile.model =
+                            parchmint_preferences::DEFAULT_ANTHROPIC_MODEL.to_owned();
+                    } else if provider == parchmint_preferences::AssistantProvider::OpenAi
+                        && self.assistant_settings.profile.model
+                            == parchmint_preferences::DEFAULT_ANTHROPIC_MODEL
+                    {
+                        self.assistant_settings.profile.model = default_openai;
+                    }
+                }
+                if provider != parchmint_preferences::AssistantProvider::OpenAiCompatible {
+                    self.assistant_settings.profile.authentication =
+                        parchmint_preferences::AssistantAuthentication::ApiKey;
+                }
+                self.assistant_settings.profile.provider = provider;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantModel(model) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.profile.model = model;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantEndpoint(endpoint) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                if self.assistant_settings.profile.endpoint != endpoint {
+                    self.assistant_settings.key = AssistantSecretDraft::default();
+                    self.assistant_settings.profile.compatible_streaming = false;
+                }
+                self.assistant_settings.profile.endpoint = endpoint;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantAuthentication(authentication) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.profile.authentication = authentication;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantFunctionTools(enabled) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.profile.compatible_function_tools = enabled;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantStreaming(enabled) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.profile.compatible_streaming = enabled;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantKey(key) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.key = key;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantSessionOnly(session_only) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.session_only = session_only;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::ToggleAssistantBudget => {
+                self.assistant_settings.show_budget = !self.assistant_settings.show_budget;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantBudget(value) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.budget_draft = value;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantWarning(value) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.warning_draft = value;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SetAssistantResetDay(value) => {
+                self.assistant_settings.edit_generation =
+                    self.assistant_settings.edit_generation.saturating_add(1);
+                self.assistant_settings.reset_draft = value;
+                self.assistant_settings.dirty = true;
+                Vec::new()
+            }
+            ProjectMessage::SaveAssistantSettings | ProjectMessage::RemoveAssistantKey => {
+                Vec::new()
+            }
             ProjectMessage::OpenCommentDetails(thread_id) => {
                 self.modal = Some(ProjectModal::CommentThread { thread_id });
                 Vec::new()
@@ -7116,6 +9182,27 @@ impl ProjectWorkspace {
             }
             ProjectMessage::OpenHierarchyNode(node_id) => {
                 self.open_hierarchy_node(node_id, None, false)
+            }
+            ProjectMessage::OpenAssistantPassage(source) => {
+                if !self.assistant_source_is_current(&source) {
+                    return Vec::new();
+                }
+                let Some(node) = self.node_for_document(&source.document_id) else {
+                    return Vec::new();
+                };
+                let effects = self.open_hierarchy_node(node, None, false);
+                if source.original.is_none()
+                    && source.section != parchmint_assistant_api::ProjectSection::Notes
+                    && source.anchor.is_some()
+                {
+                    vec![ProjectEffect::NavigateAssistantPassage {
+                        source,
+                        mount_generation: self.editor.pane(EditorPane::Primary).mount_generation(),
+                        interaction_generation: 0,
+                    }]
+                } else {
+                    effects
+                }
             }
             ProjectMessage::OpenHierarchyNodeInCompanion(node_id) => {
                 self.open_hierarchy_node(node_id, Some(EditorPane::Companion), false)
@@ -8766,7 +10853,7 @@ impl ProjectWorkspace {
     }
 
     fn activate_card(&mut self, node_id: String) -> Vec<ProjectEffect> {
-        let Some((section_id, document_id, title)) =
+        let Some((_section_id, document_id, title)) =
             self.explorer.nodes.get(&node_id).and_then(|node| {
                 (node.kind == HierarchyNodeKind::Document).then(|| {
                     (
@@ -8781,11 +10868,7 @@ impl ProjectWorkspace {
         else {
             return Vec::new();
         };
-        let pane = if is_research_section(&section_id) {
-            EditorPane::Companion
-        } else {
-            EditorPane::Primary
-        };
+        let pane = EditorPane::Primary;
         self.explorer.select(&node_id, SelectionGesture::Replace);
         self.sync_selection_context();
         self.last_activated_document = Some(document_id.clone());
@@ -8802,10 +10885,10 @@ impl ProjectWorkspace {
     fn open_hierarchy_node(
         &mut self,
         node_id: String,
-        requested_pane: Option<EditorPane>,
+        _requested_pane: Option<EditorPane>,
         preview: bool,
     ) -> Vec<ProjectEffect> {
-        let Some((section_id, document_id, title)) =
+        let Some((_section_id, document_id, title)) =
             self.explorer.nodes.get(&node_id).and_then(|node| {
                 (node.kind == HierarchyNodeKind::Document).then(|| {
                     (
@@ -8822,13 +10905,7 @@ impl ProjectWorkspace {
         };
         self.explorer.select(&node_id, SelectionGesture::Replace);
         self.sync_selection_context();
-        let pane = requested_pane.unwrap_or_else(|| {
-            if is_research_section(&section_id) {
-                EditorPane::Companion
-            } else {
-                EditorPane::Primary
-            }
-        });
+        let pane = EditorPane::Primary;
         let tab = TabSpec::new(document_id.clone(), title);
         if self
             .editor
@@ -9416,6 +11493,23 @@ fn style_properties_are_finite(properties: &StyleProperties) -> bool {
     .all(f32::is_finite)
 }
 
+fn research_originals_from_project(
+    project: &Project,
+) -> BTreeMap<String, Vec<ResearchOriginalView>> {
+    let mut result = BTreeMap::<String, Vec<ResearchOriginalView>>::new();
+    for (source_id, original) in &project.research_originals {
+        result
+            .entry(stable_id_string(original.document.as_bytes()))
+            .or_default()
+            .push(ResearchOriginalView {
+                source_id: *source_id,
+                filename: original.filename.clone(),
+                sha256: original.sha256,
+            });
+    }
+    result
+}
+
 fn metadata_values_from_project(project: &Project) -> BTreeMap<(String, String), String> {
     project
         .nodes
@@ -9432,13 +11526,639 @@ fn metadata_values_from_project(project: &Project) -> BTreeMap<(String, String),
         .collect()
 }
 
-fn is_research_section(section_id: &str) -> bool {
-    section_id == "research"
-        || section_id == stable_id_string(ProjectSection::Research.root_id().as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assistant_draft_undo_history_is_bounded() {
+        let mut history = Vec::new();
+        let content: iced::widget::text_editor::Content = iced::widget::text_editor::Content::new();
+        let cursor = content.cursor();
+        for _ in 0..100 {
+            super::remember_assistant_draft(&mut history, &"x".repeat(32 * 1024), cursor);
+        }
+        assert!(history.len() <= 64);
+        assert!(history.iter().map(|entry| entry.text.len()).sum::<usize>() <= 1024 * 1024);
+        super::remember_assistant_draft(&mut history, &"x".repeat(1024 * 1024 + 1), cursor);
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn oversized_draft_is_preserved_when_it_cannot_be_redone_safely() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let tab = super::AssistantDockTab::Ask;
+        workspace.update(super::ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        thread.draft = "x".repeat(super::ASSISTANT_DRAFT_HISTORY_BYTES + 1);
+        thread.draft_editor = iced::widget::text_editor::Content::with_text(&thread.draft);
+        let cursor = thread.draft_editor.cursor();
+        super::remember_assistant_draft(&mut thread.draft_undo, "small draft", cursor);
+        let conversation_id = thread.id.clone();
+        workspace.update(super::ProjectMessage::UndoAssistantDraft {
+            tab,
+            conversation_id,
+            redo: false,
+        });
+        let thread = workspace.assistant_thread(tab).unwrap();
+        assert_eq!(thread.draft.len(), super::ASSISTANT_DRAFT_HISTORY_BYTES + 1);
+        assert_eq!(thread.draft_undo.len(), 1);
+        assert_eq!(
+            thread.error.as_deref(),
+            Some(super::ASSISTANT_DRAFT_HISTORY_ERROR)
+        );
+    }
+
+    #[test]
+    fn compatible_streaming_requires_opt_in_again_for_a_changed_endpoint() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace.update(super::ProjectMessage::SetAssistantEndpoint(
+            "http://localhost:1/v1".into(),
+        ));
+        workspace.update(super::ProjectMessage::SetAssistantStreaming(true));
+        workspace.update(super::ProjectMessage::SetAssistantEndpoint(
+            "http://localhost:1/v1".into(),
+        ));
+        assert!(workspace.assistant_settings().profile.compatible_streaming);
+        workspace.update(super::ProjectMessage::SetAssistantEndpoint(
+            "http://localhost:2/v1".into(),
+        ));
+        assert!(!workspace.assistant_settings().profile.compatible_streaming);
+    }
+
+    #[test]
+    fn legacy_thread_migrates_to_an_identified_active_conversation() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace
+            .restore_assistant_conversations(parchmint_ui_api::AssistantConversationState {
+                threads: vec![parchmint_ui_api::AssistantSavedThread {
+                    mode: parchmint_assistant_api::AssistantMode::Ask,
+                    id: String::new(),
+                    title: String::new(),
+                    auto_title: false,
+                    active: false,
+                    research_import: None,
+                    draft: "legacy draft".into(),
+                    turns: Vec::new(),
+                    note_proposal: None,
+                    interrupted_prompts: Vec::new(),
+                    pinned_context: Vec::new(),
+                    excluded_context: Vec::new(),
+                    context_scope: None,
+                    selection_only: false,
+                }],
+                research_import: None,
+            })
+            .unwrap();
+        let saved = workspace.assistant_conversation_snapshot();
+        assert!(!saved.threads[0].id.is_empty());
+        assert!(saved.threads[0].active && saved.threads[0].auto_title);
+        assert_eq!(saved.threads[0].draft, "legacy draft");
+    }
+
+    #[test]
+    fn conversations_keep_independent_drafts_and_inherit_restrictions() {
+        use super::{AssistantDockTab as Tab, ProjectMessage as Msg};
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace.update(Msg::SelectAssistantTab(Tab::Ask));
+        let first = workspace.assistant_thread(Tab::Ask).unwrap().id.clone();
+        let thread = workspace.assistant_thread_mut(Tab::Ask);
+        thread.draft = "First draft".into();
+        thread.excluded_context.insert("private".into());
+        thread.selection_only = true;
+        workspace.update(Msg::NewAssistantConversation(Tab::Ask));
+        let second = workspace.assistant_thread(Tab::Ask).unwrap();
+        assert_ne!(second.id, first);
+        assert_eq!(second.title, "New conversation 2");
+        assert!(second.draft.is_empty());
+        assert!(second.selection_only && second.excluded_context.contains("private"));
+        let second_id = second.id.clone();
+        workspace.update(Msg::SetAssistantSelectionOnly {
+            tab: Tab::Ask,
+            conversation_id: first.clone(),
+            enabled: false,
+        });
+        assert!(workspace.assistant_thread(Tab::Ask).unwrap().selection_only);
+        assert!(
+            !workspace
+                .assistant_thread_by_id_mut(Tab::Ask, &first)
+                .unwrap()
+                .selection_only
+        );
+        workspace.assistant_thread_mut(Tab::Ask).draft = "Second draft".into();
+        let saved = workspace.assistant_conversation_snapshot();
+        let mut reopened = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        reopened.restore_assistant_conversations(saved).unwrap();
+        assert_eq!(reopened.assistant_thread(Tab::Ask).unwrap().id, second_id);
+        assert_eq!(
+            reopened.assistant_thread(Tab::Ask).unwrap().draft,
+            "Second draft"
+        );
+        reopened.update(Msg::SelectAssistantConversation {
+            tab: Tab::Ask,
+            id: first,
+        });
+        assert_eq!(
+            reopened.assistant_thread(Tab::Ask).unwrap().draft,
+            "First draft"
+        );
+    }
+
+    #[test]
+    fn research_import_completion_stays_with_its_conversation() {
+        use super::{AssistantDockTab as Tab, ProjectMessage as Msg};
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace.update(Msg::SelectAssistantTab(Tab::Research));
+        let first = workspace
+            .assistant_thread(Tab::Research)
+            .unwrap()
+            .id
+            .clone();
+        workspace.update(Msg::BeginManualResearchImport);
+        let nonce = workspace.research_import().unwrap().nonce;
+        workspace.update(Msg::NewAssistantConversation(Tab::Research));
+        workspace.update(Msg::BeginManualResearchImport);
+        let second_nonce = workspace.research_import().unwrap().nonce;
+        assert_ne!(nonce, second_nonce);
+        workspace.complete_research_import(nonce, true);
+        assert_eq!(workspace.research_import().unwrap().nonce, second_nonce);
+        workspace.update(Msg::SelectAssistantConversation {
+            tab: Tab::Research,
+            id: first,
+        });
+        assert!(workspace.research_import().is_none());
+    }
+
+    #[test]
+    fn assistant_conversations_restore_without_resending_interrupted_requests() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let saved = parchmint_ui_api::AssistantConversationState {
+            threads: vec![parchmint_ui_api::AssistantSavedThread {
+                mode: parchmint_assistant_api::AssistantMode::Ask,
+                id: "test-ask".into(),
+                title: "Test".into(),
+                auto_title: false,
+                active: true,
+                research_import: None,
+                draft: "newer draft".into(),
+                turns: Vec::new(),
+                note_proposal: Some("proposed note".into()),
+                interrupted_prompts: vec!["unfinished question".into()],
+                pinned_context: Vec::new(),
+                excluded_context: Vec::new(),
+                context_scope: None,
+                selection_only: false,
+            }],
+            ..Default::default()
+        };
+        workspace
+            .restore_assistant_conversations(saved.clone())
+            .unwrap();
+        let thread = workspace
+            .assistant_thread(super::AssistantDockTab::Ask)
+            .unwrap();
+        assert_eq!(thread.draft, "newer draft");
+        assert_eq!(thread.interrupted_prompts, ["unfinished question"]);
+        assert!(thread.pending.is_none());
+        assert_eq!(workspace.assistant_conversation_snapshot(), saved);
+    }
+
+    #[test]
+    fn explicit_note_scope_is_transient_and_owned_by_one_conversation() {
+        use super::{
+            AssistantDockTab as Tab, AssistantNotesChoice as Choice, ProjectMessage as Msg,
+        };
+        use parchmint_ui_api::AssistantExplicitNotes;
+        let snapshot = parchmint_ui_api::ProjectSnapshot {
+            project: parchmint_domain::Project::new(parchmint_domain::ProjectId::from_bytes(
+                [0x5a; 16],
+            )),
+            document_summaries: Vec::new(),
+            documents: Vec::new(),
+            styles_css: String::new(),
+        };
+        let mut workspace = super::ProjectWorkspace::from_snapshot(&snapshot);
+        workspace.update(Msg::SelectAssistantTab(Tab::Ask));
+        let first = workspace.assistant_thread(Tab::Ask).unwrap().id.clone();
+        let expected = Some(AssistantExplicitNotes::Project {
+            project_revision: workspace.project_revision(),
+            tree_hash: workspace.assistant_note_tree_hash().unwrap(),
+        });
+        workspace.update(Msg::SetAssistantDraft {
+            tab: Tab::Ask,
+            conversation_id: first.clone(),
+            value: "What should I remember?".into(),
+        });
+        workspace.update(Msg::SetAssistantNotes {
+            conversation_id: first.clone(),
+            choice: Choice::Project,
+        });
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            expected
+        );
+        let saved = workspace.assistant_conversation_snapshot();
+        let mut reopened = super::ProjectWorkspace::from_snapshot(&snapshot);
+        reopened.restore_assistant_conversations(saved).unwrap();
+        assert_eq!(
+            reopened.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+        workspace.update(Msg::NewAssistantConversation(Tab::Ask));
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+        workspace.update(Msg::SelectAssistantConversation {
+            tab: Tab::Ask,
+            id: first.clone(),
+        });
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            expected
+        );
+        workspace.update(Msg::SetAssistantDraft {
+            tab: Tab::Ask,
+            conversation_id: first.clone(),
+            value: "A different question".into(),
+        });
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+        workspace.update(Msg::SetAssistantNotes {
+            conversation_id: first.clone(),
+            choice: Choice::Project,
+        });
+        let node = workspace.explorer().root_ids()[0].to_owned();
+        workspace.update(Msg::SetAssistantContextScope {
+            tab: Tab::Ask,
+            conversation_id: first.clone(),
+            node: Some(node),
+        });
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+        workspace.update(Msg::SetAssistantNotes {
+            conversation_id: first.clone(),
+            choice: Choice::Project,
+        });
+        workspace.update(Msg::SetAssistantSelectionOnly {
+            tab: Tab::Ask,
+            conversation_id: first.clone(),
+            enabled: true,
+        });
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+        workspace.update(Msg::SetAssistantNotes {
+            conversation_id: first,
+            choice: Choice::Project,
+        });
+        assert!(workspace.assistant_thread(Tab::Ask).unwrap().selection_only);
+        assert_eq!(
+            workspace.assistant_thread(Tab::Ask).unwrap().explicit_notes,
+            None
+        );
+    }
+    #[test]
+    fn context_rules_are_exclusive_per_item_and_survive_reopening() {
+        use super::{AssistantContextRule as Rule, AssistantDockTab as Tab, ProjectMessage as Msg};
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let node = workspace.explorer().root_ids()[0].to_owned();
+        workspace.update(Msg::SelectAssistantTab(Tab::Ask));
+        let conversation_id = workspace.assistant_thread(Tab::Ask).unwrap().id.clone();
+        workspace.update(Msg::ToggleAssistantContextRule {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: node.clone(),
+            rule: Rule::Pinned,
+        });
+        assert!(
+            workspace
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .pinned_context
+                .contains(&node)
+        );
+        workspace.update(Msg::ToggleAssistantContextRule {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: node.clone(),
+            rule: Rule::Excluded,
+        });
+        workspace.update(Msg::SetAssistantContextScope {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: Some(node.clone()),
+        });
+        let thread = workspace.assistant_thread(Tab::Ask).unwrap();
+        assert!(!thread.pinned_context.contains(&node));
+        assert!(thread.excluded_context.contains(&node));
+        let saved = workspace.assistant_conversation_snapshot();
+        let mut reopened = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        reopened.restore_assistant_conversations(saved).unwrap();
+        assert!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .excluded_context
+                .contains(&node)
+        );
+        assert_eq!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .context_scope
+                .as_deref(),
+            Some(node.as_str())
+        );
+        reopened.update(Msg::SetAssistantSelectionOnly {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            enabled: true,
+        });
+        assert!(reopened.assistant_thread(Tab::Ask).unwrap().selection_only);
+        assert!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .context_scope
+                .is_none()
+        );
+        let selected_snapshot = reopened.assistant_conversation_snapshot();
+        let mut selection_reopened =
+            super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        selection_reopened
+            .restore_assistant_conversations(selected_snapshot)
+            .unwrap();
+        assert!(
+            selection_reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .selection_only
+        );
+        selection_reopened.update(Msg::SetAssistantContextScope {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: Some(node.clone()),
+        });
+        assert!(
+            !selection_reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .selection_only
+        );
+        reopened.update(Msg::SetAssistantContextScope {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: None,
+        });
+        assert!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .context_scope
+                .is_none()
+        );
+        reopened.update(Msg::ToggleAssistantContextRule {
+            tab: Tab::Ask,
+            conversation_id: conversation_id.clone(),
+            node: node.clone(),
+            rule: Rule::Excluded,
+        });
+        assert!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .excluded_context
+                .is_empty()
+        );
+        reopened.update(Msg::ToggleAssistantContextRule {
+            tab: Tab::Ask,
+            conversation_id,
+            node: "missing".into(),
+            rule: Rule::Excluded,
+        });
+        assert!(
+            reopened
+                .assistant_thread(Tab::Ask)
+                .unwrap()
+                .excluded_context
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn original_citation_freshness_uses_source_identity_and_hash() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let document = workspace
+            .explorer
+            .nodes
+            .values()
+            .find_map(|node| node.document_id.clone())
+            .unwrap();
+        let source_id = parchmint_domain::ResearchSourceId::from_bytes([17; 16]);
+        workspace.research_originals.insert(
+            document.clone(),
+            vec![super::ResearchOriginalView {
+                source_id,
+                filename: "archive.txt".into(),
+                sha256: [42; 32],
+            }],
+        );
+        let mut passage = parchmint_assistant_api::ContextPassage {
+            source_id: "S1".into(),
+            document_id: document.clone(),
+            document_revision: u64::MAX,
+            section: parchmint_assistant_api::ProjectSection::Research,
+            title: "Archive".into(),
+            anchor: None,
+            text: "Extracted source text".into(),
+            original: Some(parchmint_assistant_api::OriginalSourceEvidence {
+                source_id: parchmint_domain::encode_stable_id(source_id.as_bytes()),
+                sha256: [42; 32],
+                filename: "archive.txt".into(),
+                source_url: None,
+                retrieved_at_unix_seconds: 1,
+                extractor: "utf8-text-v1".into(),
+                segment: 1,
+            }),
+        };
+        assert!(workspace.assistant_source_is_current(&passage));
+        passage.original.as_mut().unwrap().sha256[0] ^= 1;
+        assert!(!workspace.assistant_source_is_current(&passage));
+        passage.original.as_mut().unwrap().sha256[0] ^= 1;
+        workspace.research_originals.clear();
+        assert!(!workspace.assistant_source_is_current(&passage));
+    }
+    #[test]
+    fn clearing_conversation_requires_confirmation_and_keeps_draft() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let tab = super::AssistantDockTab::Ask;
+        workspace.update(super::ProjectMessage::SelectAssistantTab(tab));
+        let thread = workspace.assistant_thread_mut(tab);
+        thread.draft = "keep this draft".into();
+        thread.interrupted_prompts.push("old request".into());
+        thread.note_proposal = Some("old proposal".into());
+        workspace.update(super::ProjectMessage::ConfirmClearAssistant);
+        assert_eq!(
+            workspace
+                .assistant_thread(tab)
+                .unwrap()
+                .interrupted_prompts
+                .len(),
+            1
+        );
+        workspace.update(super::ProjectMessage::BeginClearAssistant);
+        workspace.update(super::ProjectMessage::ConfirmClearAssistant);
+        let thread = workspace.assistant_thread(tab).unwrap();
+        assert_eq!(thread.draft, "keep this draft");
+        assert!(thread.interrupted_prompts.is_empty());
+        assert!(thread.note_proposal.is_none());
+    }
+    #[test]
+    fn assistant_history_save_status_reports_and_clears_failures() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        let tab = super::AssistantDockTab::Ask;
+        workspace.update(super::ProjectMessage::SelectAssistantTab(tab));
+        workspace
+            .assistant_thread_mut(tab)
+            .interrupted_prompts
+            .push("old request".into());
+        workspace.update(super::ProjectMessage::BeginClearAssistant);
+        workspace.update(super::ProjectMessage::ConfirmClearAssistant);
+        let conversation_id = workspace.assistant_thread(tab).unwrap().id.clone();
+        workspace.update(super::ProjectMessage::SetAssistantDraft {
+            tab,
+            conversation_id,
+            value: "new draft".into(),
+        });
+        workspace.set_assistant_history_check_pending(true);
+        workspace.accept_assistant_history_status(Ok(true));
+        assert!(workspace.assistant_history_check_pending());
+        workspace.accept_assistant_history_status(Err("disk full".into()));
+        assert!(!workspace.assistant_history_check_pending());
+        assert_eq!(workspace.assistant_history_error(), Some("disk full"));
+        let thread = workspace.assistant_thread(tab).unwrap();
+        assert!(thread.interrupted_prompts.is_empty());
+        assert_eq!(thread.draft, "new draft");
+        workspace.set_assistant_history_check_pending(true);
+        workspace.accept_assistant_history_status(Ok(true));
+        assert_eq!(workspace.assistant_history_error(), Some("disk full"));
+        workspace.accept_assistant_history_status(Ok(false));
+        assert!(!workspace.assistant_history_check_pending());
+        assert_eq!(workspace.assistant_history_error(), None);
+    }
+
+    #[test]
+    fn manual_original_import_requires_a_valid_url_and_emits_one_stable_action() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace.update(super::ProjectMessage::BeginManualResearchImport);
+        workspace.update(super::ProjectMessage::SetResearchImportTitle(
+            "Archive".into(),
+        ));
+        workspace.update(super::ProjectMessage::SetResearchImportForm(
+            super::ResearchImportForm::Original,
+        ));
+        workspace.update(super::ProjectMessage::SetResearchSourceUrl(
+            "http://example.com/archive.pdf".into(),
+        ));
+        assert!(
+            workspace
+                .update(super::ProjectMessage::ConfirmResearchImport)
+                .is_empty()
+        );
+        workspace.update(super::ProjectMessage::SetResearchSourceUrl(
+            "https://example.com/archive.pdf".into(),
+        ));
+        let effects = workspace.update(super::ProjectMessage::ConfirmResearchImport);
+        assert!(
+            matches!(&effects[..], [super::ProjectEffect::ImportResearch { form: super::ResearchImportForm::Original, sources, .. }] if sources.len() == 1 && sources[0].url == "https://example.com/archive.pdf")
+        );
+        assert!(
+            workspace
+                .update(super::ProjectMessage::ConfirmResearchImport)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn restored_research_draft_never_repeats_an_interrupted_save_automatically() {
+        let mut workspace = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        workspace.update(super::ProjectMessage::BeginManualResearchImport);
+        workspace.update(super::ProjectMessage::SetResearchImportTitle(
+            "Archive".into(),
+        ));
+        workspace.update(super::ProjectMessage::SetResearchSourceUrl(
+            "https://example.com/archive.pdf".into(),
+        ));
+        workspace.update(super::ProjectMessage::SetResearchImportForm(
+            super::ResearchImportForm::Original,
+        ));
+        let before = workspace.assistant_conversation_snapshot();
+        let mut reopened = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        reopened
+            .restore_assistant_conversations(before.clone())
+            .unwrap();
+        assert_eq!(reopened.assistant_conversation_snapshot(), before);
+        let first = workspace.update(super::ProjectMessage::ConfirmResearchImport);
+        let saved = workspace.assistant_conversation_snapshot();
+        assert!(
+            saved
+                .threads
+                .iter()
+                .find_map(|thread| thread.research_import.as_ref())
+                .unwrap()
+                .commit_started
+        );
+        let mut recovered = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        recovered
+            .restore_assistant_conversations(saved.clone())
+            .unwrap();
+        assert!(recovered.research_import().unwrap().uncertain);
+        recovered.update(super::ProjectMessage::SetResearchSourceUrl(
+            "https://example.com/other.pdf".into(),
+        ));
+        assert_eq!(
+            recovered.research_import().unwrap().manual_url.as_deref(),
+            Some("https://example.com/archive.pdf")
+        );
+        assert!(
+            recovered
+                .update(super::ProjectMessage::ConfirmResearchImport)
+                .is_empty()
+        );
+        recovered.update(super::ProjectMessage::ResumeResearchImport);
+        let retry = recovered.update(super::ProjectMessage::ConfirmResearchImport);
+        assert_eq!(first, retry);
+        let mut changed = super::ProjectWorkspace::from_fixture(super::ProjectFixture::Explorer);
+        changed.restore_assistant_conversations(saved).unwrap();
+        changed.update(super::ProjectMessage::ResumeResearchImport);
+        changed.update(super::ProjectMessage::SetResearchSourceUrl(
+            "https://example.com/other.pdf".into(),
+        ));
+        let changed_effect = changed.update(super::ProjectMessage::ConfirmResearchImport);
+        assert_ne!(first, changed_effect);
+        let [
+            super::ProjectEffect::ImportResearch {
+                nonce: first_nonce, ..
+            },
+        ] = &first[..]
+        else {
+            panic!("first import")
+        };
+        let [
+            super::ProjectEffect::ImportResearch {
+                nonce: changed_nonce,
+                ..
+            },
+        ] = &changed_effect[..]
+        else {
+            panic!("changed import")
+        };
+        assert_ne!(first_nonce, changed_nonce);
+    }
     use super::*;
 
     #[test]
@@ -10651,7 +13371,12 @@ mod tests {
                 .settings()
                 .categories()
                 .map(|category| category.label),
-            ["Appearance", "Keyboard shortcuts", "Dictionaries"]
+            [
+                "Appearance",
+                "AI assistant",
+                "Keyboard shortcuts",
+                "Dictionaries"
+            ]
         );
 
         workspace.update(ProjectMessage::SelectSettingsCategory(
@@ -13369,20 +16094,20 @@ mod tests {
     }
 
     #[test]
-    fn research_documents_default_to_the_companion_editor_pane() {
+    fn research_documents_open_in_the_editor() {
         let mut workspace = ProjectWorkspace::from_fixture(ProjectFixture::Explorer);
         assert_eq!(
             workspace.update(ProjectMessage::OpenHierarchyNode(
                 "research-notes".to_owned()
             )),
-            [ProjectEffect::OpenDocumentInCompanion(
+            [ProjectEffect::OpenDocumentInPrimary(
                 "research-notes".to_owned()
             )]
         );
         assert_eq!(
             workspace
                 .editor()
-                .pane(EditorPane::Companion)
+                .pane(EditorPane::Primary)
                 .active_document(),
             Some("research-notes")
         );

@@ -77,6 +77,9 @@ pub enum ResolvedAppearance {
 /// Settings stored outside a ParchMint project.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplicationPreferences {
+    /// Non-secret assistant configuration. Credentials belong in the platform store.
+    #[serde(default)]
+    pub assistant: AssistantPreferences,
     #[serde(default)]
     pub keybindings: Keybindings,
     #[serde(default = "default_ui_zoom")]
@@ -95,6 +98,7 @@ const fn default_ui_zoom() -> u16 {
 impl Default for ApplicationPreferences {
     fn default() -> Self {
         Self {
+            assistant: AssistantPreferences::default(),
             keybindings: Keybindings::new(),
             ui_zoom_percent: 100,
             reduced_motion: false,
@@ -103,6 +107,64 @@ impl Default for ApplicationPreferences {
             global_dictionary: Vec::new(),
         }
     }
+}
+
+/// Default model when switching from the built-in OpenAI default.
+pub const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-6";
+
+/// Provider configuration shared across projects; it must never contain a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AssistantPreferences {
+    pub provider: AssistantProvider,
+    pub model: String,
+    pub endpoint: String,
+    pub authentication: AssistantAuthentication,
+    pub compatible_function_tools: bool,
+    /// Opt in only for endpoints that implement Chat Completions streaming.
+    pub compatible_streaming: bool,
+    /// Opaque OS-store entry; never an API key.
+    pub credential_reference: Option<String>,
+    /// Digest binding the entry to a provider and normalized endpoint.
+    pub credential_binding: Option<String>,
+    /// Local estimate only; it is not the provider's credit balance.
+    pub monthly_budget_cents: u64,
+    pub warning_cents: u64,
+    /// UTC calendar day on which the locally tracked period begins (1–28).
+    pub reset_day: u8,
+}
+
+impl Default for AssistantPreferences {
+    fn default() -> Self {
+        Self {
+            provider: AssistantProvider::OpenAi,
+            model: "gpt-6.1-terra".to_owned(),
+            endpoint: String::new(),
+            authentication: AssistantAuthentication::ApiKey,
+            compatible_function_tools: false,
+            compatible_streaming: false,
+            credential_reference: None,
+            credential_binding: None,
+            monthly_budget_cents: 8_000,
+            warning_cents: 6_000,
+            reset_day: 1,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssistantProvider {
+    #[default]
+    OpenAi,
+    OpenAiCompatible,
+    Anthropic,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssistantAuthentication {
+    #[default]
+    ApiKey,
+    None,
 }
 
 /// One typed recent-project entry stored outside project data.
@@ -147,6 +209,7 @@ pub struct PreferenceSnapshot {
 /// A single application-only preference change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreferenceCommand {
+    SetAssistant(AssistantPreferences),
     SetAppearance(AppearanceMode),
     SetReducedMotion(bool),
     SetUiZoom(u16),
@@ -310,6 +373,7 @@ impl FilePreferenceStore {
                 Ok(PreferenceSnapshot {
                     revision: stored.revision,
                     values: ApplicationPreferences {
+                        assistant: AssistantPreferences::default(),
                         keybindings: Keybindings::new(),
                         ui_zoom_percent: 100,
                         reduced_motion: false,
@@ -543,6 +607,7 @@ impl PreferenceService for PreferenceCoordinator {
 
 fn apply_command(values: &mut ApplicationPreferences, command: PreferenceCommand) {
     match command {
+        PreferenceCommand::SetAssistant(assistant) => values.assistant = assistant,
         PreferenceCommand::SetKeybindings(bindings) => values.keybindings = bindings,
         PreferenceCommand::SetUiZoom(value) => values.ui_zoom_percent = value.clamp(75, 150),
         PreferenceCommand::SetReducedMotion(value) => values.reduced_motion = value,

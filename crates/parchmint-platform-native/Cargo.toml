@@ -16,6 +16,7 @@ workspace = true
 [dependencies]
 parchmint-platform-api = { path = "../parchmint-platform-api" }
 raw-window-handle = "=0.6.2"
+keyring = { version = "=3.6.3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust", "vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = { version = "=0.19.3", default-features = false }

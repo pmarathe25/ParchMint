@@ -143,6 +143,14 @@ impl ProjectVersion {
         self
     }
 
+    pub fn with_opaque_resource(mut self, path: &str, bytes: &[u8]) -> Self {
+        self.resources.insert(
+            CanonicalRelativePath::parse(path).unwrap(),
+            (bytes.to_vec(), ContentHash::of_bytes(bytes)),
+        );
+        self
+    }
+
     pub fn bytes(&self) -> BTreeMap<CanonicalRelativePath, Vec<u8>> {
         self.resources
             .iter()

@@ -25,6 +25,12 @@ leaves both durable and in-memory preferences unchanged and publishes no change.
 Global dictionary updates use the same coordinator; spelling reloads words from
 the preference store.
 
+Assistant provider, endpoint, model, authentication, local budget, reset day,
+and opaque credential reference are application preferences. API keys are not
+preference values or project resources.
+Compatible-provider streaming is opt-in because support varies by endpoint;
+older settings default to complete responses.
+
 ## Appearance events
 
 An explicit System, Light, or Dark choice uses the expected preference revision.

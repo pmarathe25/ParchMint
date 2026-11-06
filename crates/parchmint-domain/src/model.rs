@@ -1,23 +1,26 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    CheckpointId, DocumentId, DomainError, MetadataCatalog, MetadataFieldId, NodeId,
-    ProjectDictionary, ProjectId, ProjectRevision, StyleCatalog,
+    CheckDecisionId, CheckpointId, ContinuityDecisionRecord, DocumentId, DomainError,
+    MetadataCatalog, MetadataFieldId, NodeId, ProjectDictionary, ProjectId, ProjectRevision,
+    ResearchSourceId, StyleCatalog,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ProjectSection {
     Manuscript,
+    Lore,
     Research,
     Unfiled,
 }
 
 impl ProjectSection {
-    pub const ALL: [Self; 3] = [Self::Manuscript, Self::Research, Self::Unfiled];
+    pub const ALL: [Self; 4] = [Self::Manuscript, Self::Lore, Self::Research, Self::Unfiled];
 
     pub const fn root_id(self) -> NodeId {
         match self {
             Self::Manuscript => NodeId::manuscript_root(),
+            Self::Lore => NodeId::lore_root(),
             Self::Research => NodeId::research_root(),
             Self::Unfiled => NodeId::unfiled_root(),
         }
@@ -88,6 +91,7 @@ impl ProjectNode {
     fn root(section: ProjectSection) -> Self {
         let (id, title) = match section {
             ProjectSection::Manuscript => (NodeId::manuscript_root(), "Manuscript"),
+            ProjectSection::Lore => (NodeId::lore_root(), "Lore"),
             ProjectSection::Research => (NodeId::research_root(), "Research"),
             ProjectSection::Unfiled => (NodeId::unfiled_root(), "Unfiled"),
         };
@@ -384,6 +388,7 @@ impl OrderedTree<NodeId, ProjectNode> {
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.validate_fixed_root(ProjectSection::Manuscript, "Manuscript")?;
+        self.validate_fixed_root(ProjectSection::Lore, "Lore")?;
         self.validate_fixed_root(ProjectSection::Research, "Research")?;
         self.validate_fixed_root(ProjectSection::Unfiled, "Unfiled")?;
         if self
@@ -449,6 +454,7 @@ impl OrderedTree<NodeId, ProjectNode> {
         let mut visited = BTreeSet::new();
         let mut active = BTreeSet::new();
         self.visit(NodeId::manuscript_root(), &mut visited, &mut active)?;
+        self.visit(NodeId::lore_root(), &mut visited, &mut active)?;
         self.visit(NodeId::research_root(), &mut visited, &mut active)?;
         self.visit(NodeId::unfiled_root(), &mut visited, &mut active)?;
         if visited.len() != self.nodes.len() {
@@ -537,6 +543,21 @@ pub enum SpellcheckLanguage {
     EnUs,
 }
 
+pub const MAX_RESEARCH_ORIGINAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Provenance and integrity metadata for an immutable research source.
+/// The original bytes are stored separately from editable document content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResearchOriginal {
+    pub document: DocumentId,
+    pub filename: String,
+    pub media_type: String,
+    pub source_url: Option<String>,
+    pub retrieved_at_unix_seconds: u64,
+    pub byte_length: u64,
+    pub sha256: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub id: ProjectId,
@@ -550,6 +571,10 @@ pub struct Project {
     pub dictionary: ProjectDictionary,
     pub export_settings: ProjectExportSettings,
     pub deleted: BTreeMap<NodeId, DeletionTombstone>,
+    pub research_originals: BTreeMap<ResearchSourceId, ResearchOriginal>,
+    /// Sticky once decisions have been introduced, even if all are removed.
+    pub continuity_enabled: bool,
+    pub continuity_decisions: BTreeMap<CheckDecisionId, ContinuityDecisionRecord>,
 }
 
 impl Project {
@@ -566,16 +591,81 @@ impl Project {
             dictionary: ProjectDictionary::default(),
             export_settings: ProjectExportSettings::default(),
             deleted: BTreeMap::new(),
+            research_originals: BTreeMap::new(),
+            continuity_enabled: false,
+            continuity_decisions: BTreeMap::new(),
         }
     }
 
     pub fn validate(&self) -> Result<(), DomainError> {
         self.nodes.validate()?;
         self.styles.validate()?;
+        if self.continuity_decisions.len() > 1_024
+            || self
+                .continuity_decisions
+                .values()
+                .fold(0_usize, |total, item| {
+                    total.saturating_add(item.estimated_bytes())
+                })
+                > crate::MAX_CONTINUITY_DECISION_BYTES
+            || (!self.continuity_enabled && !self.continuity_decisions.is_empty())
+        {
+            return Err(DomainError::InvalidInput {
+                field: "continuity decisions",
+                reason: "invalid or oversized decision collection",
+            });
+        }
+        for (id, decision) in &self.continuity_decisions {
+            if id != &decision.id {
+                return Err(DomainError::InvalidInput {
+                    field: "continuity decision",
+                    reason: "decision ID does not match its key",
+                });
+            }
+            decision.validate()?;
+        }
         for id in self.deleted.keys() {
             if id.is_fixed_root() || self.nodes.contains(*id) {
                 return Err(DomainError::InvalidTree {
                     reason: "deleted IDs cannot be fixed roots or live nodes",
+                });
+            }
+        }
+        for original in self.research_originals.values() {
+            let live = self
+                .nodes
+                .iter()
+                .any(|(_, node)| node.kind == NodeKind::Document(original.document));
+            let deleted = self.deleted.values().any(|tombstone| {
+                tombstone.kind == NodeKind::Document(original.document)
+                    || tombstone
+                        .subtree
+                        .iter()
+                        .any(|entry| entry.node.kind == NodeKind::Document(original.document))
+            });
+            if !live && !deleted {
+                return Err(DomainError::InvalidInput {
+                    field: "research original",
+                    reason: "referenced document is missing",
+                });
+            }
+            let valid_text = |value: &str, max: usize| {
+                !value.trim().is_empty()
+                    && value.len() <= max
+                    && !value.chars().any(char::is_control)
+            };
+            if !valid_text(&original.filename, 1024)
+                || !valid_text(&original.media_type, 255)
+                || original
+                    .source_url
+                    .as_ref()
+                    .is_some_and(|url| !valid_text(url, 8192))
+                || original.retrieved_at_unix_seconds > i64::MAX as u64
+                || original.byte_length > MAX_RESEARCH_ORIGINAL_BYTES
+            {
+                return Err(DomainError::InvalidInput {
+                    field: "research original",
+                    reason: "invalid source metadata",
                 });
             }
         }

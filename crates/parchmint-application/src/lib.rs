@@ -2,6 +2,8 @@
 
 mod editor_persistence;
 mod project_persistence;
+mod research_html;
+pub mod research_text;
 
 pub use editor_persistence::{EditorPersistenceCoordinator, EditorPersistenceStatus};
 pub use project_persistence::*;
@@ -1060,6 +1062,7 @@ struct DispatcherState {
     next_checkpoint: u64,
     save_generation: u64,
     mutation_generation: u64,
+    restore_epoch: u64,
 }
 
 impl DispatcherState {
@@ -1138,6 +1141,7 @@ impl NativeProjectCommandDispatcher {
                 next_checkpoint: 0,
                 save_generation: 0,
                 mutation_generation: 0,
+                restore_epoch: 0,
             }),
             documents,
         }
@@ -1145,6 +1149,35 @@ impl NativeProjectCommandDispatcher {
 
     pub fn project(&self) -> Result<Project, ApplicationError> {
         Ok(lock(&self.state)?.project.clone())
+    }
+
+    // Capture a generation with the project so work performed outside the
+    // dispatcher can later be committed only against the same authored state.
+    fn continuity_validation_start(&self) -> Result<(Project, (u64, u64)), ApplicationError> {
+        let state = lock(&self.state)?;
+        Ok((
+            state.project.clone(),
+            (state.mutation_generation, state.restore_epoch),
+        ))
+    }
+
+    fn set_continuity_decision_if_current(
+        &self,
+        command: ProjectCommand,
+        generation: (u64, u64),
+    ) -> Result<Option<ProjectCommandResult>, ApplicationError> {
+        let mut state = lock(&self.state)?;
+        let already_published = match &command {
+            ProjectCommand::SetContinuityDecision { record, .. } => {
+                state.project.continuity_decisions.get(&record.id) == Some(record.as_ref())
+            }
+            _ => false,
+        };
+        if (state.mutation_generation, state.restore_epoch) != generation && !already_published {
+            return Ok(None);
+        }
+        self.execute_locked(&mut state, command, Vec::new(), None)
+            .map(Some)
     }
 
     /// Captures the project tree, full document catalog, and loaded bodies at
@@ -1170,6 +1203,36 @@ impl NativeProjectCommandDispatcher {
 
     pub fn project_undo_entries(&self) -> Result<Vec<ProjectUndoEntry>, ApplicationError> {
         Ok(lock(&self.state)?.undo.iter().cloned().collect())
+    }
+
+    pub(crate) fn with_retained_research_originals<R>(
+        &self,
+        use_retained: impl FnOnce(&BTreeSet<parchmint_domain::ResearchSourceId>) -> R,
+    ) -> Result<R, ApplicationError> {
+        let state = lock(&self.state)?;
+        let mut retained = state
+            .project
+            .research_originals
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for entry in state.undo.iter().chain(state.redo.iter()) {
+            for patch in [&entry.forward, &entry.inverse] {
+                match patch {
+                    ProjectPatch::Domain(ProjectCommand::CreateResearchOriginal {
+                        source_id,
+                        ..
+                    }) => {
+                        retained.insert(*source_id);
+                    }
+                    ProjectPatch::Domain(ProjectCommand::RestoreState(project)) => {
+                        retained.extend(project.research_originals.keys().copied())
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(use_retained(&retained))
     }
 
     pub fn pending_checkpoints(&self) -> Result<Vec<CheckpointGroupId>, ApplicationError> {
@@ -1362,6 +1425,7 @@ impl NativeProjectCommandDispatcher {
         let mut state = lock(&self.state)?;
         self.documents.replace_documents(documents)?;
         state.project = project;
+        state.restore_epoch = state.restore_epoch.wrapping_add(1);
         state.undo.clear();
         state.redo.clear();
         state.undo_bytes = 0;
@@ -1384,6 +1448,7 @@ impl NativeProjectCommandDispatcher {
             return Err(ApplicationError::StaleSaveAcknowledgement);
         }
         self.documents.restore_documents(vec![document])?;
+        state.restore_epoch = state.restore_epoch.wrapping_add(1);
         state.captured_saves.remove(&saved.generation);
         state.dirty.retain(|resource, generation| {
             !saved.dirty_resources.contains(*resource) || *generation > saved.mutation_generation
@@ -1405,22 +1470,59 @@ impl NativeProjectCommandDispatcher {
         node: NodeId,
         documents: Vec<DocumentSnapshot>,
     ) -> Result<ProjectCommandResult, ApplicationError> {
-        self.execute_now_with_restored_documents(ProjectCommand::restore_deleted(node), documents)
+        self.execute_now_with_restored_documents(
+            ProjectCommand::restore_deleted(node),
+            documents,
+            None,
+        )
     }
 
     fn execute_now(
         &self,
         command: ProjectCommand,
     ) -> Result<ProjectCommandResult, ApplicationError> {
-        self.execute_now_with_restored_documents(command, Vec::new())
+        if matches!(command, ProjectCommand::CreateResearchOriginal { .. }) {
+            return Err(ApplicationError::Domain(DomainError::InvalidInput {
+                field: "research original",
+                reason: "original bytes must be supplied through the import workflow",
+            }));
+        }
+        self.execute_now_with_restored_documents(command, Vec::new(), None)
+    }
+
+    pub(crate) fn create_document_with_body(
+        &self,
+        command: ProjectCommand,
+        body: String,
+    ) -> Result<ProjectCommandResult, ApplicationError> {
+        if !matches!(
+            command,
+            ProjectCommand::CreateDocument { .. } | ProjectCommand::CreateResearchOriginal { .. }
+        ) {
+            return Err(ApplicationError::Domain(DomainError::InvalidTree {
+                reason: "initial body requires a new document",
+            }));
+        }
+        self.execute_now_with_restored_documents(command, Vec::new(), Some(body))
     }
 
     fn execute_now_with_restored_documents(
         &self,
         command: ProjectCommand,
         restored_documents: Vec<DocumentSnapshot>,
+        initial_body: Option<String>,
     ) -> Result<ProjectCommandResult, ApplicationError> {
         let mut state = lock(&self.state)?;
+        self.execute_locked(&mut state, command, restored_documents, initial_body)
+    }
+
+    fn execute_locked(
+        &self,
+        state: &mut DispatcherState,
+        command: ProjectCommand,
+        restored_documents: Vec<DocumentSnapshot>,
+        initial_body: Option<String>,
+    ) -> Result<ProjectCommandResult, ApplicationError> {
         let before = state.project.revision;
         let forward = command.clone();
         let applied = parchmint_domain::apply_project_command(&state.project, before, command)?;
@@ -1438,10 +1540,12 @@ impl NativeProjectCommandDispatcher {
         // A document node and its canonical editor state are one application
         // mutation. The project lock remains held until both are published, so
         // snapshot queries can never observe a node without its default body.
-        if let ProjectCommand::CreateDocument { document_id, .. } = &forward {
+        if let ProjectCommand::CreateDocument { document_id, .. }
+        | ProjectCommand::CreateResearchOriginal { document_id, .. } = &forward
+        {
             self.documents.insert_document(DocumentSnapshot {
                 document_id: *document_id,
-                body: "<p></p>".to_owned(),
+                body: initial_body.unwrap_or_else(|| "<p></p>".to_owned()),
                 comments: Vec::new(),
                 revision: EditorRevision::default(),
                 visibility: DocumentVisibility::Open,
@@ -1756,7 +1860,13 @@ fn lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, ApplicationError> {
 }
 
 fn patch_byte_cost(command: &ProjectCommand) -> usize {
-    format!("{command:?}").len()
+    let overhead = format!("{command:?}").len();
+    match command {
+        ProjectCommand::CreateResearchOriginal { original, .. } => {
+            overhead.saturating_add(usize::try_from(original.byte_length).unwrap_or(usize::MAX))
+        }
+        _ => overhead,
+    }
 }
 
 fn affected_documents(patch: &DocumentPatchSet) -> ResourceSet {
@@ -1772,6 +1882,7 @@ fn command_label(command: &ProjectCommand) -> &'static str {
     match command {
         ProjectCommand::CreateGroup { .. } => "Create Group",
         ProjectCommand::CreateDocument { .. } => "Create Document",
+        ProjectCommand::CreateResearchOriginal { .. } => "Import Research Source",
         ProjectCommand::DeleteNode { .. } => "Delete",
         ProjectCommand::RestoreDeleted { .. } => "Restore Deleted",
         ProjectCommand::MoveNode { .. } => "Move",
@@ -1788,6 +1899,8 @@ fn command_label(command: &ProjectCommand) -> &'static str {
         ProjectCommand::AddDictionaryWord { .. } => "Add Dictionary Word",
         ProjectCommand::RemoveDictionaryWord { .. } => "Remove Dictionary Word",
         ProjectCommand::SetProjectExportSettings { .. } => "Edit Project Export Settings",
+        ProjectCommand::SetContinuityDecision { .. } => "Review Continuity Finding",
+        ProjectCommand::RemoveContinuityDecision { .. } => "Remove Continuity Decision",
         ProjectCommand::RestoreState(_) => "Restore Project State",
     }
 }

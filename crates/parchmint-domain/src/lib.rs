@@ -2,6 +2,7 @@
 
 mod catalogs;
 mod commands;
+mod continuity;
 mod error;
 mod ids;
 mod model;
@@ -10,6 +11,7 @@ mod words;
 
 pub use catalogs::*;
 pub use commands::*;
+pub use continuity::*;
 pub use error::*;
 pub use ids::*;
 pub use model::*;

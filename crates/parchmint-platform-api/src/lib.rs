@@ -131,6 +131,33 @@ impl fmt::Display for PlatformError {
 
 impl Error for PlatformError {}
 
+/// An API credential that is never included in debug output.
+pub struct CredentialSecret(String);
+
+impl CredentialSecret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CredentialSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+/// Credential operations may block and must be dispatched away from the UI thread.
+/// Profile IDs are non-secret stable identifiers, not provider credentials.
+pub trait CredentialStore: Send + Sync {
+    fn read(&self, profile_id: &str) -> Result<Option<CredentialSecret>, PlatformError>;
+    fn write(&self, profile_id: &str, secret: &CredentialSecret) -> Result<(), PlatformError>;
+    fn delete(&self, profile_id: &str) -> Result<(), PlatformError>;
+}
+
 /// A menu expressed in ParchMint semantics rather than native menu objects.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SemanticMenu {

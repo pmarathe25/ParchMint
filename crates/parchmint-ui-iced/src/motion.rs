@@ -301,6 +301,7 @@ pub(crate) fn row_instant<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Ele
         anchor_leading: false,
     })
 }
+#[cfg(test)]
 pub(crate) fn row_editor<'a, Message: 'a>(slots: Vec<Slot<'a, Message>>) -> Element<'a, Message> {
     Element::new(MotionRow {
         slots,

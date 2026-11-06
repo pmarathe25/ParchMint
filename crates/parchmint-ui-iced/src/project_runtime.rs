@@ -20,8 +20,8 @@ use std::{
 use std::time::Instant;
 
 use parchmint_application::{
-    ApplicationError, CreateDocumentWorkflow, DeleteSubtreesWorkflow, DuplicateSubtreesWorkflow,
-    MoveNodeWorkflow, MoveNodesWorkflow,
+    ApplicationError, CreateDocumentWorkflow, CreateResearchDocumentWorkflow,
+    DeleteSubtreesWorkflow, DuplicateSubtreesWorkflow, MoveNodeWorkflow, MoveNodesWorkflow,
 };
 #[cfg(feature = "diagnostics")]
 use parchmint_diagnostics::{self as diagnostics, Level as DiagnosticLevel};
@@ -132,9 +132,111 @@ impl NativeProjectEffectExecutor {
         let resolvers = StableIdResolvers::from_snapshot(&current);
 
         match effect {
+            ProjectEffect::SetContinuityDecision { record, expected } => {
+                let snapshot = self
+                    .ports
+                    .set_continuity_decision(*record, expected.map(|record| *record))
+                    .await?;
+                Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                    snapshot,
+                )))
+            }
+            ProjectEffect::ImportResearch {
+                nonce,
+                parent_id,
+                title,
+                question,
+                answer,
+                sources,
+                form,
+                retrieved_at,
+            } => {
+                let parent = resolvers.node(&parent_id)?;
+                if current.project.nodes.section(parent)
+                    != Some(parchmint_domain::ProjectSection::Research)
+                    || sources.is_empty()
+                    || (form == crate::ResearchImportForm::Original && sources.len() != 1)
+                {
+                    return Err(ProjectRuntimeError::InvalidEffect(
+                        "Research destination or sources are unavailable",
+                    ));
+                }
+                let request = CreateResearchDocumentWorkflow {
+                    document: CreateDocumentWorkflow {
+                        node: NodeId::from_bytes(research_import_id(nonce, 1)),
+                        document: DocumentId::from_bytes(research_import_id(nonce, 2)),
+                        parent,
+                        index: current.project.nodes.children(parent).len(),
+                        title,
+                    },
+                    body: research_html(&question, &answer, &sources, form, retrieved_at)?,
+                };
+                let snapshot = if form == crate::ResearchImportForm::Original {
+                    self.ports
+                        .fetch_research_original(parchmint_ui_api::FetchResearchOriginalWorkflow {
+                            document: request.document,
+                            source_id: parchmint_domain::ResearchSourceId::from_bytes(
+                                research_import_id(nonce, 3),
+                            ),
+                            source_url: sources[0].url.clone(),
+                            body: request.body,
+                        })
+                        .await?
+                } else {
+                    self.ports.create_research_document(request).await?
+                };
+                Ok(ProjectEffectCompletion::WorkflowSnapshot(Box::new(
+                    snapshot,
+                )))
+            }
             ProjectEffect::OpenDocumentInPrimary(document_id) => {
                 self.open_documents(&current, &resolvers, EditorPane::Primary, [document_id])
                     .await
+            }
+            ProjectEffect::NavigateAssistantPassage {
+                source,
+                mount_generation,
+                interaction_generation,
+            } => {
+                let range = parse_assistant_anchor(&source)?;
+                let document = resolvers.document(&source.document_id)?;
+                let (load, snapshot) = self.load_document(&current, document).await?;
+                Ok(ProjectEffectCompletion::NavigateAssistantPassage {
+                    snapshot: Box::new(snapshot),
+                    document: ResolvedDocumentMount {
+                        pane: EditorPane::Primary,
+                        load,
+                    },
+                    range,
+                    source,
+                    mount_generation,
+                    interaction_generation,
+                })
+            }
+            ProjectEffect::ReturnToWriting {
+                document_id,
+                session,
+                revision,
+                selection,
+                scroll_y,
+                mount_generation,
+                interaction_generation,
+            } => {
+                let document = resolvers.document(&document_id)?;
+                let (load, snapshot) = self.load_document(&current, document).await?;
+                Ok(ProjectEffectCompletion::ReturnToWriting {
+                    snapshot: Box::new(snapshot),
+                    document: ResolvedDocumentMount {
+                        pane: EditorPane::Primary,
+                        load,
+                    },
+                    session,
+                    revision,
+                    selection,
+                    scroll_y,
+                    mount_generation,
+                    interaction_generation,
+                })
             }
             ProjectEffect::OpenDocumentInCompanion(document_id) => {
                 self.open_documents(&current, &resolvers, EditorPane::Companion, [document_id])
@@ -850,6 +952,24 @@ pub(crate) enum ProjectEffectCompletion {
         document: ResolvedDocumentMount,
         range: FindMatch,
     },
+    NavigateAssistantPassage {
+        snapshot: Box<ProjectSnapshot>,
+        document: ResolvedDocumentMount,
+        range: FindMatch,
+        source: Box<parchmint_assistant_api::ContextPassage>,
+        mount_generation: u64,
+        interaction_generation: u64,
+    },
+    ReturnToWriting {
+        snapshot: Box<ProjectSnapshot>,
+        document: ResolvedDocumentMount,
+        session: parchmint_editor_api::SharedEditorSession,
+        revision: parchmint_editor_api::EditorRevision,
+        selection: EditorSelection,
+        scroll_y: f32,
+        mount_generation: u64,
+        interaction_generation: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -949,6 +1069,7 @@ pub(crate) enum ProjectRuntimeError {
         ui_id: String,
     },
     InvalidEffect(&'static str),
+    ResearchNotStarted(String),
     Port {
         service: &'static str,
         message: String,
@@ -964,6 +1085,7 @@ impl ProjectRuntimeError {
     pub(crate) fn user_message(&self) -> String {
         match self {
             Self::Port { message, .. } => format!("The action could not complete: {message}"),
+            Self::ResearchNotStarted(message) => message.clone(),
             Self::StaleSession { .. } => "This project is no longer open.".to_owned(),
             Self::StaleSnapshot { .. } => "The project changed. Please try again.".to_owned(),
             Self::UnknownStableId { .. } => "This item is no longer available.".to_owned(),
@@ -997,6 +1119,9 @@ impl fmt::Display for ProjectRuntimeError {
                 write!(formatter, "unknown {kind:?} UI ID {ui_id}")
             }
             Self::InvalidEffect(reason) => write!(formatter, "invalid project effect: {reason}"),
+            Self::ResearchNotStarted(message) => {
+                write!(formatter, "research import was not started: {message}")
+            }
             Self::Port { service, message } => write!(formatter, "{service} failed: {message}"),
             Self::SaveDidNotReach { requested, written } => write!(
                 formatter,
@@ -1014,7 +1139,11 @@ impl fmt::Display for ProjectRuntimeError {
 #[cfg(feature = "diagnostics")]
 fn project_effect_name(effect: &ProjectEffect) -> &'static str {
     match effect {
+        ProjectEffect::SetContinuityDecision { .. } => "set-continuity-decision",
+        ProjectEffect::ImportResearch { .. } => "import-research",
         ProjectEffect::OpenDocumentInPrimary(_) => "open-document-primary",
+        ProjectEffect::NavigateAssistantPassage { .. } => "navigate-assistant-passage",
+        ProjectEffect::ReturnToWriting { .. } => "return-to-writing",
         ProjectEffect::OpenDocumentInCompanion(_) => "open-document-companion",
         ProjectEffect::CreateHierarchy { .. } => "create-hierarchy",
         ProjectEffect::CreateDraft { .. } => "create-draft",
@@ -1091,6 +1220,7 @@ enum PortError {
         service: &'static str,
         message: String,
     },
+    ResearchNotStarted(String),
 }
 
 impl From<PortError> for ProjectRuntimeError {
@@ -1104,6 +1234,7 @@ impl From<PortError> for ProjectRuntimeError {
                 generation,
             },
             PortError::Failed { service, message } => Self::Port { service, message },
+            PortError::ResearchNotStarted(message) => Self::ResearchNotStarted(message),
         }
     }
 }
@@ -1151,6 +1282,40 @@ trait RuntimeProjectPorts: Send + Sync {
             Err(PortError::Failed {
                 service: "ProjectWorkflowPort::create_document",
                 message: "workflow port is unavailable".to_owned(),
+            })
+        })
+    }
+    fn set_continuity_decision(
+        &self,
+        _record: parchmint_domain::ContinuityDecisionRecord,
+        _expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::set_continuity_decision",
+                message: "Continuity decisions are unavailable".to_owned(),
+            })
+        })
+    }
+    fn create_research_document(
+        &self,
+        _request: CreateResearchDocumentWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::create_research_document",
+                message: "Research import is unavailable".to_owned(),
+            })
+        })
+    }
+    fn fetch_research_original(
+        &self,
+        _request: parchmint_ui_api::FetchResearchOriginalWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        Box::pin(async {
+            Err(PortError::Failed {
+                service: "ProjectWorkflowPort::fetch_research_original",
+                message: "Original-source import is unavailable".into(),
             })
         })
     }
@@ -1248,7 +1413,82 @@ struct ProjectUiPortAdapter {
     ports: ProjectUiPorts,
 }
 
+fn flush_research_import_draft(ports: &ProjectUiPorts) -> Result<(), PortError> {
+    let access = ports.access().map_err(PortError::from)?;
+    access
+        .assistant(|assistant| assistant.map(|service| service.flush_conversation()))
+        .map_err(PortError::from)?
+        .ok_or_else(|| {
+            PortError::ResearchNotStarted("Research draft storage is unavailable.".into())
+        })?
+        .map_err(PortError::ResearchNotStarted)
+}
+
 impl RuntimeProjectPorts for ProjectUiPortAdapter {
+    fn fetch_research_original(
+        &self,
+        request: parchmint_ui_api::FetchResearchOriginalWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            crate::native::worker_pool::submit_research_source(move || {
+                let result = (|| {
+                    flush_research_import_draft(&ports)?;
+                    let access = ports.access().map_err(PortError::from)?;
+                    access
+                        .workflows(|workflows| workflows.fetch_research_original(request))
+                        .map_err(PortError::from)?
+                        .map(|result| result.snapshot)
+                        .map_err(|error| {
+                            if error.is_not_started() {
+                                PortError::ResearchNotStarted(error.to_string())
+                            } else {
+                                PortError::Failed {
+                                    service: "ProjectWorkflowPort::fetch_research_original",
+                                    message: error.to_string(),
+                                }
+                            }
+                        })
+                })();
+                let _ = sender.send(result);
+            })
+            .map_err(PortError::ResearchNotStarted)?;
+            receiver.await.map_err(|_| PortError::Failed {
+                service: "research download",
+                message: "The download worker stopped.".into(),
+            })?
+        })
+    }
+    fn create_research_document(
+        &self,
+        request: CreateResearchDocumentWorkflow,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let (sender, receiver) = iced::futures::channel::oneshot::channel();
+            crate::native::worker_pool::submit_research_source(move || {
+                let result = (|| {
+                    flush_research_import_draft(&ports)?;
+                    let access = ports.access().map_err(PortError::from)?;
+                    access
+                        .workflows(|workflows| workflows.create_research_document(request))
+                        .map_err(PortError::from)?
+                        .map(|result| result.snapshot)
+                        .map_err(|error| PortError::Failed {
+                            service: "ProjectWorkflowPort::create_research_document",
+                            message: error.to_string(),
+                        })
+                })();
+                let _ = sender.send(result);
+            })
+            .map_err(PortError::ResearchNotStarted)?;
+            receiver.await.map_err(|_| PortError::Failed {
+                service: "research save",
+                message: "The save worker stopped.".into(),
+            })?
+        })
+    }
     fn authorize(&self) -> Result<(), PortError> {
         self.ports.access().map(|_| ()).map_err(PortError::from)
     }
@@ -1433,6 +1673,25 @@ impl RuntimeProjectPorts for ProjectUiPortAdapter {
                 .map(|_| ())
                 .map_err(|error| PortError::Failed {
                     service: "PreferenceService::update",
+                    message: error.to_string(),
+                })
+        })
+    }
+
+    fn set_continuity_decision(
+        &self,
+        record: parchmint_domain::ContinuityDecisionRecord,
+        expected: Option<parchmint_domain::ContinuityDecisionRecord>,
+    ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+        let ports = self.ports.clone();
+        Box::pin(async move {
+            let access = ports.access().map_err(PortError::from)?;
+            access
+                .workflows(|workflows| workflows.set_continuity_decision(record, expected))
+                .map_err(PortError::from)?
+                .map(|result| result.snapshot)
+                .map_err(|error| PortError::Failed {
+                    service: "ProjectWorkflowPort::set_continuity_decision",
                     message: error.to_string(),
                 })
         })
@@ -1954,6 +2213,89 @@ fn selection(start: u64, end: u64) -> EditorSelection {
     EditorSelection::new(DocumentPosition::from(start), DocumentPosition::from(end))
 }
 
+fn research_html(
+    question: &str,
+    answer: &str,
+    sources: &[parchmint_assistant_api::WebCitation],
+    form: crate::ResearchImportForm,
+    retrieved_at: u64,
+) -> Result<String, ProjectRuntimeError> {
+    fn escape(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\n', "<br>")
+    }
+    let timestamp = i64::try_from(retrieved_at)
+        .ok()
+        .and_then(|value| chrono::DateTime::from_timestamp(value, 0))
+        .ok_or(ProjectRuntimeError::InvalidEffect(
+            "Research source date is unavailable",
+        ))?;
+    if sources.len() > 64
+        || sources
+            .iter()
+            .any(|source| !source.url.starts_with("https://") || source.url.len() > 4096)
+    {
+        return Err(ProjectRuntimeError::InvalidEffect(
+            "Research source links are invalid",
+        ));
+    }
+    let label = match form {
+        crate::ResearchImportForm::Summary => "AI-generated summary",
+        crate::ResearchImportForm::SourceLink => "Source links; original content is not copied",
+        crate::ResearchImportForm::Original => "Original source stored in this project",
+    };
+    let characters = answer.chars().collect::<Vec<_>>();
+    let mut spans = sources
+        .iter()
+        .filter_map(|source| {
+            let (start, end) = (source.start_index?, source.end_index?);
+            (start < end && end <= characters.len()).then_some((start, end, &source.url))
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|(start, _, _)| *start);
+    let mut cited_answer = String::new();
+    let mut cursor = 0;
+    for (start, end, url) in spans {
+        if start < cursor {
+            continue;
+        }
+        cited_answer.push_str(&escape(
+            &characters[cursor..start].iter().collect::<String>(),
+        ));
+        cited_answer.push_str(&format!(
+            "<a href=\"{}\">{}</a>",
+            escape(url),
+            escape(&characters[start..end].iter().collect::<String>())
+        ));
+        cursor = end;
+    }
+    cited_answer.push_str(&escape(&characters[cursor..].iter().collect::<String>()));
+    let content = if form == crate::ResearchImportForm::Summary {
+        cited_answer
+    } else {
+        String::new()
+    };
+    let mut body = format!(
+        "<p>{}</p><p>Question: {}</p><p>Source access date: {}</p><p>{}</p><p>Sources:</p>",
+        label,
+        escape(question),
+        timestamp.format("%Y-%m-%d UTC"),
+        content
+    );
+    for source in sources {
+        body.push_str(&format!(
+            "<p><a href=\"{}\">{}</a></p>",
+            escape(&source.url),
+            escape(&source.title)
+        ));
+    }
+    Ok(body)
+}
+
 fn generated_node_id(snapshot: &ProjectSnapshot, operation: u64) -> NodeId {
     let mut ordinal = 0_u64;
     loop {
@@ -1963,6 +2305,16 @@ fn generated_node_id(snapshot: &ProjectSnapshot, operation: u64) -> NodeId {
         }
         ordinal = ordinal.saturating_add(1);
     }
+}
+
+fn research_import_id(nonce: [u8; 16], tag: u8) -> [u8; 16] {
+    let mut input = [0_u8; 17];
+    input[..16].copy_from_slice(&nonce);
+    input[16] = tag;
+    let hash = parchmint_project_format::ContentHash::of_bytes(&input);
+    let mut id = [0; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
 }
 
 fn generated_document_id(snapshot: &ProjectSnapshot, operation: u64) -> DocumentId {
@@ -2049,6 +2401,36 @@ fn unsupported_project_effect(effect: &ProjectEffect) -> Option<UnsupportedEffec
     })
 }
 
+fn parse_assistant_anchor(
+    source: &parchmint_assistant_api::ContextPassage,
+) -> Result<FindMatch, ProjectRuntimeError> {
+    let invalid = || ProjectRuntimeError::InvalidEffect("assistant passage anchor is invalid");
+    let anchor = source.anchor.as_deref().ok_or_else(invalid)?;
+    let mut parts = anchor.split(':');
+    if parts.next() != Some("text") {
+        return Err(invalid());
+    }
+    let start = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse::<u64>()
+        .map_err(|_| invalid())?;
+    let end = parts
+        .next()
+        .ok_or_else(invalid)?
+        .parse::<u64>()
+        .map_err(|_| invalid())?;
+    let length = u64::try_from(source.text.chars().count()).map_err(|_| invalid())?;
+    if parts.next().is_some()
+        || length == 0
+        || length > 1200
+        || end.checked_sub(start) != Some(length)
+    {
+        return Err(invalid());
+    }
+    Ok(FindMatch::new(start, end))
+}
+
 fn parse_search_match_id(match_id: &str) -> Result<(String, FindMatch, u64), ProjectRuntimeError> {
     let parts = match_id.split(':').collect::<Vec<_>>();
     if parts.len() != 6 || parts[0].len() != 32 || parts[1].len() != 32 {
@@ -2096,6 +2478,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn assistant_passage_anchor_rejects_malformed_or_inconsistent_ranges() {
+        let mut source = parchmint_assistant_api::ContextPassage {
+            source_id: "S1".into(),
+            document_id: "document".into(),
+            document_revision: 1,
+            section: parchmint_assistant_api::ProjectSection::Lore,
+            title: "Lore".into(),
+            anchor: Some("text:4:6".into()),
+            text: "🌊é".into(),
+            original: None,
+        };
+        assert_eq!(
+            parse_assistant_anchor(&source).unwrap(),
+            FindMatch::new(4, 6)
+        );
+        for invalid in [
+            "text:6:4",
+            "text:4:7",
+            "text:4:6:1",
+            "other:4:6",
+            "text:0:999999",
+        ] {
+            source.anchor = Some(invalid.into());
+            assert!(parse_assistant_anchor(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn research_import_escapes_untrusted_text_and_retains_source_provenance() {
+        use parchmint_project_format::{CanonicalCodec, ProjectFormatCodec};
+        let sources = vec![parchmint_assistant_api::WebCitation {
+            url: "https://example.com/article?a=1&b=2".into(),
+            title: "Source & title".into(),
+            start_index: None,
+            end_index: None,
+        }];
+        let body = research_html(
+            "What <happened>?",
+            "<script>not markup</script>",
+            &sources,
+            crate::ResearchImportForm::Summary,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(body.contains("&lt;script&gt;"));
+        assert!(body.contains("https://example.com/article?a=1&amp;b=2"));
+        assert!(body.contains("2023-11-14 UTC"));
+        ProjectFormatCodec::default()
+            .decode_document(body.as_bytes())
+            .unwrap();
+        let cited = vec![parchmint_assistant_api::WebCitation {
+            start_index: Some(0),
+            end_index: Some(5),
+            ..sources[0].clone()
+        }];
+        let body = research_html(
+            "q",
+            "Claim and evidence",
+            &cited,
+            crate::ResearchImportForm::Summary,
+            1_700_000_000,
+        )
+        .unwrap();
+        assert!(body.contains(">Claim</a> and evidence"));
+        let invalid = vec![parchmint_assistant_api::WebCitation {
+            url: "http://example.com".into(),
+            ..sources[0].clone()
+        }];
+        assert!(
+            research_html(
+                "q",
+                "a",
+                &invalid,
+                crate::ResearchImportForm::Summary,
+                1_700_000_000
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn user_errors_keep_the_cause_without_service_names() {
         let error = ProjectRuntimeError::Port {
             service: "ProjectWorkflowPort::create_named_snapshot",
@@ -2117,6 +2580,7 @@ mod tests {
         snapshot: Mutex<ProjectSnapshot>,
         lazy_documents: Mutex<BTreeMap<DocumentId, DocumentSnapshot>>,
         duplicate_requests: Mutex<Vec<DuplicateSubtreesWorkflow>>,
+        original_requests: Mutex<Vec<parchmint_ui_api::FetchResearchOriginalWorkflow>>,
         project_undo_calls: Mutex<u8>,
         project_redo_calls: Mutex<u8>,
         global_words: Mutex<Vec<String>>,
@@ -2129,6 +2593,7 @@ mod tests {
                 snapshot: Mutex::new(snapshot),
                 lazy_documents: Mutex::new(BTreeMap::new()),
                 duplicate_requests: Mutex::new(Vec::new()),
+                original_requests: Mutex::new(Vec::new()),
                 project_undo_calls: Mutex::new(0),
                 project_redo_calls: Mutex::new(0),
                 global_words: Mutex::new(Vec::new()),
@@ -2152,6 +2617,16 @@ mod tests {
     }
 
     impl RuntimeProjectPorts for FakePorts {
+        fn fetch_research_original(
+            &self,
+            request: parchmint_ui_api::FetchResearchOriginalWorkflow,
+        ) -> RuntimeFuture<Result<ProjectSnapshot, PortError>> {
+            let result = self.authorize().map(|_| {
+                self.original_requests.lock().unwrap().push(request);
+                self.snapshot.lock().unwrap().clone()
+            });
+            Box::pin(async move { result })
+        }
         fn authorize(&self) -> Result<(), PortError> {
             if *self.current.lock().expect("current mutex poisoned") {
                 Ok(())
@@ -3059,6 +3534,35 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn original_research_retry_uses_the_same_identities_and_selected_source() {
+        let (snapshot, _, _, _) = fixture();
+        let (executor, ports) = executor(snapshot);
+        let effect = ProjectEffect::ImportResearch {
+            nonce: [42; 16],
+            parent_id: stable_id_string(NodeId::research_root().as_bytes()),
+            title: "Archive".into(),
+            question: "Question".into(),
+            answer: "Do not rewrite this source".into(),
+            sources: vec![parchmint_assistant_api::WebCitation {
+                title: "Archive".into(),
+                url: "https://example.com/archive.pdf".into(),
+                start_index: None,
+                end_index: None,
+            }],
+            form: crate::ResearchImportForm::Original,
+            retrieved_at: 1,
+        };
+        block_on(executor.clone().execute_project_effect(effect.clone())).unwrap();
+        block_on(executor.execute_project_effect(effect)).unwrap();
+        let requests = ports.original_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[0].source_url, "https://example.com/archive.pdf");
+        assert!(!requests[0].body.contains("Do not rewrite this source"));
+        assert!(requests[0].body.contains("Original source stored"));
     }
 
     #[test]

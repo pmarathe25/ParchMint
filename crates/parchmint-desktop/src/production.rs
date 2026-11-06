@@ -107,6 +107,9 @@ mod dependencies {
 
 use dependencies::*;
 
+mod assistant_config;
+mod assistant_conversations;
+mod assistant_workflow;
 mod composition;
 #[cfg(feature = "interaction-harness")]
 mod interaction_harness;

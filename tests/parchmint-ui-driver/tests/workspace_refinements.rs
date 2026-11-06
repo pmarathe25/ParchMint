@@ -25,7 +25,7 @@ fn capture(harness: &DesktopInteractionHarness, name: &str) {
 }
 
 #[test]
-fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
+fn first_launch_is_a_single_editor_writing_workspace() {
     let run = IsolatedRun::new("workspace-startup").unwrap();
     let harness = DesktopInteractionHarness::launch(run.root(), LaunchRequest::launcher()).unwrap();
     assert!(harness.has_window(WINDOW).unwrap());
@@ -34,12 +34,21 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
     harness
         .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "The first line.")
         .unwrap();
-    harness
-        .click_target(WINDOW, HarnessTarget::ToggleCompanion)
-        .unwrap();
-    assert_eq!(harness.active_editor_tab_title().unwrap(), "Untitled");
-    assert!(!harness.editor_panes_share_session().unwrap_or(false));
-    capture(&harness, "empty-companion");
+    assert_eq!(
+        harness.active_editor_tab_title().unwrap(),
+        "Untitled Document"
+    );
+    assert!(
+        !harness
+            .target_is_visible(WINDOW, HarnessTarget::ToggleCompanion)
+            .unwrap()
+    );
+    assert!(
+        !harness
+            .target_is_visible(WINDOW, HarnessTarget::EditorCompanion)
+            .unwrap()
+    );
+    capture(&harness, "single-editor");
     open_formatting(&harness);
     assert!(harness.text_is_visible(WINDOW, "15").unwrap());
     harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
@@ -51,14 +60,8 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
     open_formatting(&harness);
     assert!(harness.text_is_visible(WINDOW, "24").unwrap());
     harness
-        .type_into_target(WINDOW, HarnessTarget::EditorCompanion, "A separate note.")
+        .type_into_target(WINDOW, HarnessTarget::EditorPrimary, "A heading.")
         .unwrap();
-    assert!(
-        !harness
-            .active_editor_body()
-            .unwrap()
-            .contains("The first line.")
-    );
     assert!(
         harness
             .active_editor_body()
@@ -66,7 +69,7 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
             .contains("data-style-id=\"heading-1\"")
     );
     harness
-        .click_target(WINDOW, HarnessTarget::NewTab(EditorPane::Companion))
+        .click_target(WINDOW, HarnessTarget::NewTab(EditorPane::Primary))
         .unwrap();
     open_formatting(&harness);
     assert!(harness.text_is_visible(WINDOW, "15").unwrap());
@@ -75,21 +78,18 @@ fn first_launch_is_a_writing_workspace_and_companion_starts_empty() {
     harness
         .type_into_target(
             WINDOW,
-            HarnessTarget::EditorCompanion,
+            HarnessTarget::EditorPrimary,
             "A fresh body paragraph.",
         )
         .unwrap();
     open_formatting(&harness);
     assert!(harness.text_is_visible(WINDOW, "15").unwrap());
     harness.press_key(WINDOW, HarnessKey::Escape).unwrap();
-    harness
-        .click_target(WINDOW, HarnessTarget::EditorPrimary)
-        .unwrap();
     assert!(
         harness
             .active_editor_body()
             .unwrap()
-            .contains("The first line.")
+            .contains("A fresh body paragraph.")
     );
     harness.close(WINDOW).unwrap();
     harness.shutdown().unwrap();

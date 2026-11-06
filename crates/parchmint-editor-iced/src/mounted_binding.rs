@@ -188,6 +188,14 @@ impl MountedEditorBinding {
         self.host.restore_focus()
     }
 
+    /// Makes an arbitrary position visible without changing the selection.
+    pub fn reveal_position(
+        &self,
+        position: parchmint_editor_api::DocumentPosition,
+    ) -> Result<(), EditorError> {
+        self.host.reveal_position(position)
+    }
+
     /// Reflows the retained editor when the native pane allocation changes.
     pub fn resize(&self, viewport: EditorViewport) -> Result<(), EditorError> {
         self.host.resize(viewport)

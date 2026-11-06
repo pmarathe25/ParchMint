@@ -11,6 +11,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
+sha2.workspace = true
+parchmint-assistant-api = { path = "../parchmint-assistant-api" }
 parchmint-application = { path = "../parchmint-application" }
 parchmint-domain = { path = "../parchmint-domain" }
 parchmint-editor-api = { path = "../parchmint-editor-api" }

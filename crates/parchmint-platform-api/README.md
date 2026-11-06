@@ -16,6 +16,8 @@ Operations that can wait return asynchronously.
 - `DialogService`, `MenuService`, `ClipboardService`, and `ExternalOpenService`
   perform native actions.
 - `ApplicationPathService` supplies application directories.
+- `CredentialStore` reads, writes, and removes profile-scoped secrets without
+  exposing them in debug output. Calls can block and belong on a worker.
 - `SystemAppearanceService` supplies current system appearance.
 - `MenuActivationService` and `SystemAppearanceEventService` return pull-based
   `MenuActivationStream` and `SystemAppearanceEventStream` values.

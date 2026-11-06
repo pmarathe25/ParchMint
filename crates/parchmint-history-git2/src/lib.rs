@@ -885,13 +885,24 @@ fn build_tree(
         .map_err(|error| storage_git("clear private History index", error))?;
     let files = NativeProjectFileSystem::new();
     for (path, expected_hash) in &input.resources {
-        let bytes = files
-            .read(root, path)
-            .map_err(|error| HistoryError::Storage {
-                operation: "read canonical checkpoint resource",
-                reason: error.to_string(),
-            })?;
-        let bytes = normalize_line_endings(&bytes);
+        let bytes = (if path.is_research_original() {
+            files.read_bounded(
+                root,
+                path,
+                parchmint_project_format::MAX_RESEARCH_ORIGINAL_BYTES,
+            )
+        } else {
+            files.read(root, path)
+        })
+        .map_err(|error| HistoryError::Storage {
+            operation: "read canonical checkpoint resource",
+            reason: error.to_string(),
+        })?;
+        let bytes = if path.is_research_original() {
+            bytes
+        } else {
+            normalize_line_endings(&bytes)
+        };
         let actual_hash = ContentHash::of_bytes(&bytes);
         if &actual_hash != expected_hash {
             return Err(HistoryError::InvalidInput {
@@ -1309,6 +1320,7 @@ fn load_snapshot_resource(
     if entry.kind() != Some(ObjectType::Blob) || entry.filemode() != 0o100644 {
         return Err(corrupt("checkpoint resource is not a regular file"));
     }
+    validate_original_blob_size(repository, entry.id(), path)?;
     let blob = repository
         .find_blob(entry.id())
         .map_err(|error| corrupt_git("load checkpoint resource", error))?;
@@ -1379,6 +1391,7 @@ fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, 
     let mut resources = BTreeMap::new();
     let mut bytes_by_path = BTreeMap::new();
     for (path, blob_id) in snapshot_tree_entries(repository, tree_id)? {
+        validate_original_blob_size(repository, blob_id, &path)?;
         let blob = repository
             .find_blob(blob_id)
             .map_err(|error| corrupt_git("load checkpoint resource", error))?;
@@ -1391,6 +1404,27 @@ fn load_snapshot(repository: &Repository, tree_id: Oid) -> Result<SnapshotData, 
         resources,
         bytes: bytes_by_path,
     })
+}
+
+fn validate_original_blob_size(
+    repository: &Repository,
+    id: Oid,
+    path: &CanonicalRelativePath,
+) -> Result<(), HistoryError> {
+    if path.is_research_original() {
+        let odb = repository
+            .odb()
+            .map_err(|error| corrupt_git("open checkpoint object database", error))?;
+        let (length, kind) = odb
+            .read_header(id)
+            .map_err(|error| corrupt_git("read checkpoint resource header", error))?;
+        if kind != ObjectType::Blob
+            || length as u64 > parchmint_project_format::MAX_RESEARCH_ORIGINAL_BYTES
+        {
+            return Err(corrupt("research original exceeds its size limit"));
+        }
+    }
+    Ok(())
 }
 
 fn snapshot_tree_entries(
@@ -1450,6 +1484,7 @@ fn validate_resource_paths<'a>(
 }
 
 fn is_history_resource(path: &CanonicalRelativePath) -> bool {
+    let is_original = path.is_research_original();
     let path = path.as_str();
     matches!(
         path,
@@ -1459,10 +1494,12 @@ fn is_history_resource(path: &CanonicalRelativePath) -> bool {
             | "dictionary.txt"
             | "deletions.json"
     ) || ((path.starts_with("manuscript/")
+        || path.starts_with("lore/")
         || path.starts_with("research/")
         || path.starts_with("unfiled/"))
         && path.ends_with(".html"))
         || (path.starts_with("annotations/") && path.ends_with(".json"))
+        || is_original
 }
 
 fn current_canonical_paths(root: &Path) -> Result<BTreeSet<CanonicalRelativePath>, HistoryError> {
@@ -1487,7 +1524,7 @@ fn current_canonical_paths(root: &Path) -> Result<BTreeSet<CanonicalRelativePath
             Err(error) => return Err(current_path_io("inspect current project resource", error)),
         }
     }
-    for directory in ["manuscript", "research", "unfiled", "annotations"] {
+    for directory in ["manuscript", "lore", "research", "unfiled", "annotations"] {
         let target = root.join(directory);
         match fs::symlink_metadata(&target) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {

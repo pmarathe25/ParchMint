@@ -23,6 +23,11 @@ and redo create new revisions and use the normal save path.
 - `NativeDocumentStateOwner` manages loaded and lazy document state.
 - `ProjectPersistenceCoordinator` and `EditorPersistenceCoordinator` connect
   revisioned snapshots to injected save and recovery services.
+- `research_text` extracts bounded UTF-8 text, Markdown, HTML, and XHTML from
+  preserved Research originals using the same rules as assistant retrieval.
+  HTML extraction does not execute scripts or load external resources; it is
+  a text approximation rather than a rendered page. XHTML parsing does not
+  resolve DTD-defined entities.
 
 See [lib.rs](src/lib.rs) for signatures. Long-running work returns futures,
 streams, task handles, or event receivers. Application state remains synchronous

@@ -33,6 +33,7 @@ timer subscriptions or reproduce every OS scheduling interleaving.
 | `elapse_notifications` | Dispatch notification expiry and other work due in that interval |
 | `hold_completions` | Run services but retain their result messages |
 | `release_completions(newest_first)` | Deliver retained results in either order after further input |
+| `defer_next_assistant_request` / `complete_deferred_tasks` | Suspend polling of an assistant task while its worker runs, then resume completion handling |
 
 Use these controls to test stale results and timer boundaries without sleeps.
 The JSON Lines command interface exposes the corresponding controls.
@@ -105,7 +106,7 @@ visual judgment and native verification.
 ## Large documents and performance
 
 [large_document_resilience_flows.rs](tests/large_document_resilience_flows.rs)
-covers 250,000-word documents through two-pane writing, workspace state, autosave,
+covers 250,000-word documents through writing, workspace state, autosave,
 global search and replacement, History, restart, and abandoned-session recovery.
 Virtual clocks avoid real-time waits. Assertions cover retained text markers,
 canonical files, recovered data, and absence of error diagnostics.

@@ -294,7 +294,31 @@ fn list_prints_every_fixture_appearance_and_reference_id() {
         .collect::<Vec<_>>();
     assert_eq!(lines.len(), 20);
     assert!(lines.contains(&"editor-single-default\tdark\teditor-single-dark".to_owned()));
+    assert!(lines.contains(&"editor-assistant-default\tdark\teditor-assistant-dark".to_owned()));
     assert!(
         lines.contains(&"export-default\tlight\texport-project-output-controls-light".to_owned())
     );
+}
+
+#[test]
+fn native_capture_rejects_the_headless_assistant_fixture() {
+    let directory = TestDirectory::new();
+    let output_path = directory.path().join("assistant.png");
+    let output = Command::new(env!("CARGO_BIN_EXE_parchmint-ui-verify"))
+        .args([
+            "native-capture",
+            "--desktop",
+            "not-a-desktop",
+            "--target",
+            "editor-assistant-default",
+            "--appearance",
+            "light",
+            "--output",
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not available for native capture"));
+    assert!(!output_path.exists());
 }

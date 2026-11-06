@@ -49,6 +49,24 @@ pub(super) fn submit(job: impl FnOnce() + Send + 'static) -> Result<(), String> 
         .submit(Box::new(job))
 }
 
+/// Long provider requests never occupy the general project worker pool.
+pub(crate) fn submit_assistant(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    static POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
+    POOL.get_or_init(|| WorkerPool::new(2, 2))
+        .as_ref()
+        .map_err(Clone::clone)?
+        .submit(Box::new(job))
+}
+
+/// Source downloads are isolated from model requests and ordinary project work.
+pub(crate) fn submit_research_source(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    static POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
+    POOL.get_or_init(|| WorkerPool::new(2, 2))
+        .as_ref()
+        .map_err(Clone::clone)?
+        .submit(Box::new(job))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -539,6 +539,7 @@ fn load_checkpoint_document(
         let mut matches = preview.resource_paths.iter().filter(|path| {
             let name = path.as_str();
             (name.starts_with("manuscript/")
+                || name.starts_with("lore/")
                 || name.starts_with("research/")
                 || name.starts_with("unfiled/"))
                 && name.ends_with(".html")

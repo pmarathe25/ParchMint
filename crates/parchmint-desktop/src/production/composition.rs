@@ -5,6 +5,8 @@ use super::workflow_adapters::{ControlledExporter, spellcheck_fault};
 use super::*;
 
 pub(super) struct SharedServices {
+    pub(super) assistant_budget: Option<Arc<parchmint_assistant_budget::BudgetJournal>>,
+    pub(super) assistant_conversations_dir: std::path::PathBuf,
     pub(super) editor: Arc<EditorIcedAdapter>,
     pub(super) spellcheck: Arc<EnUsSpellcheckService>,
     pub(super) dictionary_source: Arc<ProductionDictionarySource>,
@@ -277,8 +279,18 @@ fn assemble_with_platform(
         platform.application_paths.clone(),
         platform.appearance.clone(),
     )
-    .with_menu_activations(platform.menu_activations.clone());
+    .with_menu_activations(platform.menu_activations.clone())
+    .with_credentials(platform.credentials.clone())
+    .with_session_credentials(Arc::new(
+        parchmint_platform_native::SessionCredentialStore::default(),
+    ));
     let shared = Arc::new(SharedServices {
+        assistant_conversations_dir: paths.data().join("assistant-conversations"),
+        assistant_budget: parchmint_assistant_budget::BudgetJournal::open(
+            paths.data().join("assistant-usage.json"),
+        )
+        .ok()
+        .map(Arc::new),
         editor,
         spellcheck,
         dictionary_source,
