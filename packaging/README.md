@@ -74,8 +74,8 @@ release. A deployment failure leaves the GitHub release available.
    Actions**. Allow `main` and release tags to deploy to the `github-pages`
    environment if deployment restrictions are configured.
 2. Create a dedicated OpenPGP signing key and keep a protected backup. Add the
-   ASCII-armored secret key and its passphrase as Actions secrets
-   `APT_SIGNING_KEY` and `APT_SIGNING_PASSPHRASE`. Set the Actions variable
+   ASCII-armored secret key and its passphrase as secrets in the `github-pages` environment. Use
+   `APT_SIGNING_KEY` and `APT_SIGNING_PASSPHRASE`. Set the environment variable
    `APT_SIGNING_FINGERPRINT` to the primary key's full 40-character fingerprint
    without spaces.
 3. Publish the fingerprint in the installation guide. Before changing the
