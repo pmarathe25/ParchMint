@@ -58,8 +58,10 @@ jobs:
           verification=$(mktemp -d)
           chmod 755 "$verification"
           mkdir "$verification/lists"
+          cp -a site "$verification/site"
+          install -m 0644 site/parchmint-archive-key.asc "$verification/archive-key.asc"
           printf 'deb [arch=amd64 signed-by=%s] file:%s stable main\n' \
-            "$PWD/site/parchmint-archive-key.asc" "$PWD/site" > "$verification/parchmint.list"
+            "$verification/archive-key.asc" "$verification/site" > "$verification/parchmint.list"
           apt_options=(
             -o "Dir::Etc::sourcelist=$verification/parchmint.list"
             -o Dir::Etc::sourceparts=-
