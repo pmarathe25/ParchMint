@@ -39,7 +39,22 @@ To remove ParchMint, move it from Applications to the Trash.
 
 ## Linux
 
-From the download folder, use `apt` to install the package and its dependencies.
+Use the signed APT repository for automatic updates once it is deployed.
+Download the [archive public key](https://pmarathe25.github.io/ParchMint/parchmint-archive-key.asc)
+and check its primary fingerprint with `gpg --show-keys --fingerprint parchmint-archive-key.asc`.
+Before adding the key, confirm that the fingerprint is
+`5CE5 14C6 F3AF AE50 EFC5 1C1C 40F5 7E18 FAB6 B185`.
+
+```sh
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo install -m 0644 parchmint-archive-key.asc /etc/apt/keyrings/parchmint.asc
+echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/parchmint.asc] https://pmarathe25.github.io/ParchMint stable main' |
+  sudo tee /etc/apt/sources.list.d/parchmint.list
+sudo apt update
+sudo apt install parchmint
+```
+
+For a standalone download, use `apt` to install the package and its dependencies.
 Substitute your downloaded filename:
 
 ```sh

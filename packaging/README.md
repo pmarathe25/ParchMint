@@ -62,6 +62,27 @@ ticket before calculating its checksum. See [Apple's distribution guide](https:/
 The Windows executable, application windows, and all native packages use the
 icons in `packaging/icons`, converted from the supplied ParchMint artwork.
 
+## Publish the signed APT repository
+
+GitHub Pages serves the latest release's Linux package and its signed APT
+metadata. The release workflow deploys it after publishing. To deploy an
+existing release or retry a failed deployment, run **Publish APT repository**
+from the Actions tab on `main`. Both entry points fetch the current latest
+release. A deployment failure leaves the GitHub release available.
+
+1. Set **Settings → Pages → Build and deployment → Source** to **GitHub
+   Actions**. Allow `main` and release tags to deploy to the `github-pages`
+   environment if deployment restrictions are configured.
+2. Create a dedicated OpenPGP signing key and keep a protected backup. Add the
+   ASCII-armored secret key and its passphrase as secrets in the `github-pages` environment. Use
+   `APT_SIGNING_KEY` and `APT_SIGNING_PASSPHRASE`. Set the environment variable
+   `APT_SIGNING_FINGERPRINT` to the primary key's full 40-character fingerprint
+   without spaces.
+3. Publish the fingerprint in the installation guide. Before changing the
+   signing key, distribute the new public key and fingerprint to users.
+4. Deploy the archive and follow the installation guide on Ubuntu 24.04 to
+   confirm that APT accepts the signature and installs ParchMint.
+
 ## Prepare the host
 
 Use Python 3.11 or later, the pinned Rust toolchain, and the target OS:

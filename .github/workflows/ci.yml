@@ -265,3 +265,13 @@ jobs:
             --title "ParchMint ${RELEASE_TAG#v}" \
             --generate-notes \
             --notes "Download the installer for your operating system below. See the [installation guide](https://github.com/$GITHUB_REPOSITORY/blob/$RELEASE_TAG/docs/install.md)."
+
+  apt_repository:
+    name: Publish signed APT repository
+    needs: publish
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/apt-pages.yml
+    secrets: inherit

@@ -1,0 +1,79 @@
+name: Publish APT repository
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Download latest published Linux package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          latest=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          if [[ ! "$latest" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a numeric release tag, got $latest" >&2
+            exit 1
+          fi
+          package="ParchMint-${latest#v}-linux-x86_64.deb"
+          gh release download "$latest" --repo "$GITHUB_REPOSITORY" --dir release \
+            --pattern "$package" --pattern "$package.sha256"
+          (
+            cd release
+            sha256sum --check --strict "$package.sha256"
+          )
+      - name: Install APT repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apt-utils dpkg-dev
+      - name: Build and verify signed APT repository
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+          APT_SIGNING_PASSPHRASE: ${{ secrets.APT_SIGNING_PASSPHRASE }}
+          APT_SIGNING_FINGERPRINT: ${{ vars.APT_SIGNING_FINGERPRINT }}
+        run: bash packaging/build_apt_repository.sh release site
+      - name: Verify APT accepts the archive and downloads the package
+        run: |
+          set -euo pipefail
+          verification=$(mktemp -d)
+          chmod 755 "$verification"
+          mkdir "$verification/lists"
+          printf 'deb [arch=amd64 signed-by=%s] file:%s stable main\n' \
+            "$PWD/site/parchmint-archive-key.asc" "$PWD/site" > "$verification/parchmint.list"
+          apt_options=(
+            -o "Dir::Etc::sourcelist=$verification/parchmint.list"
+            -o Dir::Etc::sourceparts=-
+            -o "Dir::State::lists=$verification/lists"
+          )
+          sudo apt-get "${apt_options[@]}" update
+          (
+            cd "$verification"
+            apt-get "${apt_options[@]}" download parchmint
+            cmp -- parchmint_*_amd64.deb "$GITHUB_WORKSPACE"/release/*.deb
+          )
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+      - name: Deploy APT repository
+        id: deployment
+        uses: actions/deploy-pages@v4
