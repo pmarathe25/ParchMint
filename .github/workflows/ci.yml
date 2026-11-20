@@ -270,6 +270,7 @@ jobs:
     name: Publish signed APT repository
     needs: publish
     permissions:
+      actions: read
       contents: read
       pages: write
       id-token: write
