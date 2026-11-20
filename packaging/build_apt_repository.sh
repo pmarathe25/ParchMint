@@ -23,10 +23,16 @@ shopt -s nullglob
 packages=("$release"/*-linux-x86_64.deb)
 [[ ${#packages[@]} == 1 ]] || { echo 'Expected exactly one Linux package' >&2; exit 1; }
 mkdir -p "$site/pool/main" "$site/dists/stable/main/binary-amd64"
-cp -- "${packages[0]}" "$site/pool/main/"
+package="${packages[0]}"
+version=$(dpkg-deb --field "$package" Version)
+[[ $(dpkg-deb --field "$package" Package) == parchmint &&
+   $(dpkg-deb --field "$package" Architecture) == amd64 &&
+   "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Unexpected Linux package metadata' >&2; exit 1; }
+cp -- "$package" "$site/pool/main/parchmint_${version}_amd64.deb"
 (
   cd "$site"
   dpkg-scanpackages --arch amd64 pool /dev/null > dists/stable/main/binary-amd64/Packages
+  test -s dists/stable/main/binary-amd64/Packages
   gzip -n -k dists/stable/main/binary-amd64/Packages
   apt-ftparchive -o APT::FTPArchive::Release::Origin=ParchMint \
     -o APT::FTPArchive::Release::Label=ParchMint \
